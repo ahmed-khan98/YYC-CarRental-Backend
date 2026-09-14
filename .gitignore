@@ -1,0 +1,11 @@
+node_modules
+.env
+.env.*
+!.env.example
+logs/
+*.log
+uploads/
+public/uploads/
+!public/uploads/.gitkeep
+public/temp/
+!public/temp/.gitkeep

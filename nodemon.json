@@ -1,0 +1,15 @@
+{
+  "watch": ["src"],
+  "ext": "js",
+  "ignore": [
+    "node_modules/**",
+    "assets/**",
+    "**/*.pdf",
+    "**/*.docx",
+    "**/tmp/**",
+    "**/.tmp*",
+    "**/*.log",
+    ".env"
+  ],
+  "delay": 2000
+}
