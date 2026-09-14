@@ -1,7 +1,7 @@
-/** Business timezone — Pakistan (PKT). */
-export const APP_TIMEZONE = "Asia/Karachi";
+/** Business timezone — Calgary, Alberta (Mountain Time). */
+export const APP_TIMEZONE = "America/Edmonton";
 
-/** e.g. "Aug 31, 2026 at 4:40 PM" in Pakistan time */
+/** e.g. "Aug 31, 2026 at 4:40 PM" in Calgary time */
 export function formatAppDateTime(value) {
   if (value == null) return "—";
   const date = value instanceof Date ? value : new Date(value);

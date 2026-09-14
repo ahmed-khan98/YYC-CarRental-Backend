@@ -76,12 +76,18 @@ import {
   resolveCancellationPolicy,
 } from "../utils/cancellation.js";
 
-function queueBookingConfirmationDocuments(bookingId) {
+function queueBookingConfirmationDocuments(bookingId, { sendEmail = true } = {}) {
   runInBackground("Booking confirmation documents", async () => {
     const fresh = await Booking.findById(bookingId);
     if (!fresh) return;
     await attachInvoicesForChangedEntries(fresh, []);
     await fresh.save();
+    if (!sendEmail) {
+      console.info("Booking confirmation email skipped: admin-created booking", {
+        bookingId: String(bookingId),
+      });
+      return;
+    }
     await sendBookingConfirmationEmail(fresh);
   });
 }
@@ -659,7 +665,7 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
   await syncBookingBillEntries(booking, car);
   await booking.save();
 
-  queueBookingConfirmationDocuments(booking._id);
+  queueBookingConfirmationDocuments(booking._id, { sendEmail: false });
 
   return res.status(201).json(new ApiResponse(201, formatDoc(booking), "Booking created"));
 });
