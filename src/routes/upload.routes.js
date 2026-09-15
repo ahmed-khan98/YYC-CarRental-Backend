@@ -16,7 +16,8 @@ router.route("/multiple").post(verifyJWT, upload.array("files", 12), uploadMulti
 router.route("/sessions").post(verifyJWT, startChunkUpload);
 router
   .route("/sessions/:id/chunks/:index")
-  .put(verifyJWT, express.raw({ type: () => true, limit: "800kb" }), putChunkUpload);
+  .put(verifyJWT, express.raw({ type: () => true, limit: "800kb" }), putChunkUpload)
+  .post(verifyJWT, upload.single("chunk"), putChunkUpload);
 router.route("/sessions/:id/complete").post(verifyJWT, completeChunkUpload);
 
 export default router;

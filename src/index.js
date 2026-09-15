@@ -4,11 +4,11 @@ import { app } from "./app.js";
 import { ensureUploadsRoot, getUploadsRoot } from "./utils/localFileStore.js";
 
 process.on("unhandledRejection", (reason) => {
-  console.error("CRITICAL UNHANDLED REJECTION:", reason?.message || reason);
+  console.error("Unhandled promise rejection:", reason?.message || reason);
 });
 
 process.on("uncaughtException", (err) => {
-  console.error("CRITICAL UNCAUGHT EXCEPTION:", err.message);
+  console.error("Uncaught exception:", err?.message || err);
 });
 
 connectDB()

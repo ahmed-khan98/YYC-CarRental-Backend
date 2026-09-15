@@ -105,7 +105,11 @@ const startChunkUpload = asyncHandler(async (req, res) => {
 });
 
 const putChunkUpload = asyncHandler(async (req, res) => {
-  const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || []);
+  const buffer = req.file
+    ? await readUploadBuffer(req.file)
+    : Buffer.isBuffer(req.body)
+      ? req.body
+      : Buffer.from(req.body || []);
   await writeChunk(req.params.id, req.user._id, req.params.index, buffer);
   return res.status(200).json(new ApiResponse(200, { received: true }, "Chunk uploaded"));
 });

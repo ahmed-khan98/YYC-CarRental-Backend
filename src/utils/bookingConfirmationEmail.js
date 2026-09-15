@@ -5,9 +5,13 @@ import {
   generateFullInvoicePdf,
   getBookingPublicNumber,
 } from "./billInvoicePdf.js";
-import { getSmtpFrom, getStaffReplyTo, sendMail } from "./mailer.js";
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import {
+  getSmtpFrom,
+  getStaffReplyTo,
+  isDeliverableEmailAddress,
+  logCustomerEmailFailure,
+  sendMail,
+} from "./mailer.js";
 
 function escapeHtml(value) {
   return String(value)
@@ -22,8 +26,7 @@ function normalizeEmail(value) {
 }
 
 function isValidCustomerEmail(value) {
-  const email = normalizeEmail(value);
-  return email.length > 0 && email.length <= 254 && EMAIL_RE.test(email);
+  return isDeliverableEmailAddress(normalizeEmail(value));
 }
 
 function formatMoney(amount) {
@@ -68,14 +71,6 @@ function carDisplayName(car) {
 
 function locationName(location) {
   return location?.name?.trim() || "—";
-}
-
-function logEmailError(label, bookingId, err) {
-  console.error(label, {
-    bookingId: String(bookingId),
-    code: err?.code || Number(err?.responseCode) || "unknown",
-    message: err?.message,
-  });
 }
 
 export function buildBookingConfirmationMailOptions({
@@ -176,8 +171,9 @@ export async function sendBookingConfirmationEmail(booking) {
     ]);
 
     if (!isValidCustomerEmail(customer?.email)) {
-      console.info("Booking confirmation email skipped: customer has no email", {
+      console.info("Booking confirmation email skipped: invalid or undeliverable customer email", {
         bookingId: String(bookingId),
+        email: customer?.email || null,
       });
       return { skipped: true, reason: "no_email" };
     }
@@ -202,7 +198,6 @@ export async function sendBookingConfirmationEmail(booking) {
     });
     return { skipped: false, info };
   } catch (err) {
-    logEmailError("Booking confirmation email failed:", bookingId, err);
-    return { skipped: true, reason: "send_failed" };
+    return logCustomerEmailFailure("Booking confirmation email", { bookingId: String(bookingId) }, err);
   }
 }

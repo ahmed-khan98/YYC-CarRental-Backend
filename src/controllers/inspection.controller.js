@@ -517,6 +517,10 @@ const createInspection = asyncHandler(async (req, res) => {
     signatureImageUrl = checkIn.signatureImageUrl;
   }
 
+  const storedImageUrls = Array.isArray(imageUrls)
+    ? imageUrls.map((url) => String(url ?? "").trim()).filter(Boolean)
+    : [];
+
   const inspection = await VehicleInspection.create({
     carId,
     bookingId,
@@ -524,7 +528,7 @@ const createInspection = asyncHandler(async (req, res) => {
     mileage,
     fuelLevel,
     notes,
-    imageUrls,
+    imageUrls: storedImageUrls,
     signatureImageUrl,
     ...(type === "check_in" && paidAmountAtCheckIn != null ? { paidAmountAtCheckIn } : {}),
     ...(type === "check_in" ? { securityDepositAmount: SECURITY_DEPOSIT_AMOUNT } : {}),

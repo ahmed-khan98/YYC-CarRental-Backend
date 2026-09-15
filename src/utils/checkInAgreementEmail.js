@@ -1,9 +1,13 @@
 import { User } from "../models/user.model.js";
 import { Car } from "../models/car.model.js";
 import { getBookingPublicNumber } from "./billInvoicePdf.js";
-import { getSmtpFrom, getStaffReplyTo, sendMail } from "./mailer.js";
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import {
+  getSmtpFrom,
+  getStaffReplyTo,
+  isDeliverableEmailAddress,
+  logCustomerEmailFailure,
+  sendMail,
+} from "./mailer.js";
 
 function escapeHtml(value) {
   return String(value)
@@ -18,8 +22,7 @@ function normalizeEmail(value) {
 }
 
 function isValidCustomerEmail(value) {
-  const email = normalizeEmail(value);
-  return email.length > 0 && email.length <= 254 && EMAIL_RE.test(email);
+  return isDeliverableEmailAddress(normalizeEmail(value));
 }
 
 function formatTimeForDisplay(timeStr) {
@@ -54,14 +57,6 @@ function formatScheduleDate(dateStr, timeStr) {
 function carDisplayName(car) {
   if (!car) return "Vehicle";
   return `${car.year} ${car.make} ${car.model}`.trim();
-}
-
-function logEmailError(label, bookingId, err) {
-  console.error(label, {
-    bookingId: String(bookingId),
-    code: err?.code || Number(err?.responseCode) || "unknown",
-    message: err?.message,
-  });
 }
 
 export function buildCheckInAgreementMailOptions({
@@ -145,8 +140,9 @@ export async function sendCheckInAgreementEmail(booking, pdfBuffer) {
     ]);
 
     if (!isValidCustomerEmail(customer?.email)) {
-      console.info("Check-in agreement email skipped: customer has no email", {
+      console.info("Check-in agreement email skipped: invalid or undeliverable customer email", {
         bookingId: String(bookingId),
+        email: customer?.email || null,
       });
       return { skipped: true, reason: "no_email" };
     }
@@ -168,7 +164,6 @@ export async function sendCheckInAgreementEmail(booking, pdfBuffer) {
     });
     return { skipped: false, info };
   } catch (err) {
-    logEmailError("Check-in agreement email failed:", bookingId, err);
-    return { skipped: true, reason: "send_failed" };
+    return logCustomerEmailFailure("Check-in agreement email", { bookingId: String(bookingId) }, err);
   }
 }

@@ -132,8 +132,29 @@ export async function sendMail(mailOptions) {
     throw error;
   }
 
-  const transporter = getTransporter();
-  return transporter.sendMail(mailOptions);
+  const recipients = listAddresses(mailOptions?.to);
+  if (!recipients.length || recipients.some((address) => !isValidEmailAddress(address))) {
+    const error = new Error("Invalid recipient email address");
+    error.code = "INVALID_RECIPIENT";
+    throw error;
+  }
+  if (recipients.some((address) => !isDeliverableEmailAddress(address))) {
+    const error = new Error(`Can't send mail — recipient domain is not deliverable: ${recipients.join(", ")}`);
+    error.code = "EMAIL_UNDELIVERABLE";
+    throw error;
+  }
+
+  try {
+    const transporter = getTransporter();
+    return await transporter.sendMail(mailOptions);
+  } catch (err) {
+    if (isUndeliverableEmailError(err)) {
+      const error = new Error(err?.message || "Recipient email was rejected");
+      error.code = "EMAIL_UNDELIVERABLE";
+      throw error;
+    }
+    throw err;
+  }
 }
 
 function getContactBcc() {
@@ -141,14 +162,69 @@ function getContactBcc() {
 }
 
 const VISITOR_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const NON_DELIVERABLE_DOMAINS = new Set([
+  "example.com",
+  "example.net",
+  "example.org",
+  "localhost",
+  "invalid",
+  "test",
+]);
+
+let sharedTransporter;
+
+export function isValidEmailAddress(value) {
+  const email = String(value || "").trim();
+  return email.length > 0 && email.length <= 254 && VISITOR_EMAIL_RE.test(email);
+}
+
+export function isDeliverableEmailAddress(value) {
+  if (!isValidEmailAddress(value)) return false;
+  const domain = String(value).trim().split("@")[1]?.toLowerCase() || "";
+  if (!domain || NON_DELIVERABLE_DOMAINS.has(domain)) return false;
+  return !/\.(example|test|invalid|localhost)$/i.test(domain);
+}
+
+export function isUndeliverableEmailError(err) {
+  const code = String(err?.code || "");
+  const responseCode = Number(err?.responseCode);
+  const text = String(err?.message || err?.response || "");
+  return (
+    code === "EENVELOPE" ||
+    code === "EMESSAGE" ||
+    code === "EMAIL_UNDELIVERABLE" ||
+    code === "INVALID_RECIPIENT" ||
+    responseCode === 550 ||
+    responseCode === 551 ||
+    responseCode === 552 ||
+    responseCode === 553 ||
+    /recipients were rejected/i.test(text) ||
+    /mailbox unavailable/i.test(text) ||
+    /user unknown/i.test(text) ||
+    /account or domain may not exist/i.test(text)
+  );
+}
 
 function normalizeVisitorEmail(value) {
   return String(value || "").trim();
 }
 
 function isValidVisitorEmail(value) {
-  const email = normalizeVisitorEmail(value);
-  return email.length > 0 && email.length <= 254 && VISITOR_EMAIL_RE.test(email);
+  return isValidEmailAddress(normalizeVisitorEmail(value));
+}
+
+export function logCustomerEmailFailure(label, extra, err) {
+  const payload = {
+    ...extra,
+    code: err?.code || Number(err?.responseCode) || "unknown",
+    message: err?.message,
+  };
+  if (isUndeliverableEmailError(err)) {
+    console.warn(`${label} skipped: invalid or rejected recipient`, payload);
+    return { skipped: true, reason: "undeliverable" };
+  }
+  console.error(`${label} failed:`, payload);
+  return { skipped: true, reason: "send_failed" };
 }
 
 function getMailDomain() {
@@ -170,6 +246,8 @@ function listAddresses(value) {
 }
 
 function getTransporter() {
+  if (sharedTransporter) return sharedTransporter;
+
   const port = getSmtpPort();
   const secure = getSmtpSecure(port);
   const options = {
@@ -187,7 +265,11 @@ function getTransporter() {
     options.requireTLS = true;
   }
 
-  return nodemailer.createTransport(options);
+  sharedTransporter = nodemailer.createTransport(options);
+  sharedTransporter.on("error", (err) => {
+    console.error("SMTP connection error:", err?.message || err);
+  });
+  return sharedTransporter;
 }
 
 function escapeHtml(value) {

@@ -23,6 +23,11 @@ export function validateMainDriverCheckInDetails(mainDriver) {
     }
   }
 
+  const email = mainDriver.emailAddress.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    return "Main driver: enter a valid email address";
+  }
+
   if (!isStoredImageUrl(mainDriver.licenseImageUrl)) {
     return "Main driver: license image is required";
   }
