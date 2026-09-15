@@ -10,10 +10,16 @@ const getCurrentUser = asyncHandler(async (req, res) => {
   return res.status(200).json(new ApiResponse(200, formatDoc(req.user), "Current user fetched"));
 });
 
+const PRIMARY_ADMIN_EMAIL = "ahmedkhn015@gmail.com";
+const PRIMARY_ADMIN_DISPLAY_NAME = "Admin";
+
 const updateProfile = asyncHandler(async (req, res) => {
   const { name, phone, licenseUrl } = req.body;
   const patch = {};
-  if (name !== undefined) patch.name = patchText(name);
+  if (name !== undefined) {
+    const email = typeof req.user?.email === "string" ? req.user.email.toLowerCase() : "";
+    patch.name = email === PRIMARY_ADMIN_EMAIL ? PRIMARY_ADMIN_DISPLAY_NAME : patchText(name);
+  }
   if (phone !== undefined) patch.phone = patchText(phone);
   if (licenseUrl !== undefined) patch.licenseUrl = licenseUrl;
   if (phone && licenseUrl) patch.profileComplete = true;
@@ -62,6 +68,7 @@ const createSubAdmin = asyncHandler(async (req, res) => {
     email: normalizedEmail,
     password,
     role: "sub_admin",
+    isActive: true,
     createdBy: req.user._id,
   });
 
@@ -105,7 +112,7 @@ const updateSubAdmin = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Only sub-admin accounts can be updated from this page");
   }
 
-  const { name, email, password } = req.body;
+  const { name, email, password, isActive } = req.body;
   if (name !== undefined) {
     const trimmed = name.trim();
     if (!trimmed) throw new ApiError(400, "Name is required");
@@ -125,6 +132,12 @@ const updateSubAdmin = asyncHandler(async (req, res) => {
       throw new ApiError(400, "Password must be at least 6 characters");
     }
     user.password = password;
+  }
+  if (typeof isActive === "boolean") {
+    user.isActive = isActive;
+    if (!isActive) {
+      user.refreshToken = undefined;
+    }
   }
 
   await user.save();

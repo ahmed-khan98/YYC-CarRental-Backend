@@ -9,12 +9,13 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
 import { formatDoc } from "../utils/formatDoc.js";
+import { enrichCar } from "../utils/enrichCar.js";
+import { formatInspections } from "../utils/formatInspection.js";
 import {
   uploadToStorage,
   uploadPdfToStorage,
   fetchStoredPdf,
   readStoredFile,
-  resolvePublicMediaUrl,
 } from "../utils/localFileStore.js";
 import {
   buildAgreementContext,
@@ -33,7 +34,6 @@ import {
   applyInspectionActorToBooking,
   createdByFields,
   performedByFields,
-  resolveBookingActor,
   staffUpdatedByFields,
 } from "../utils/bookingAudit.js";
 import {
@@ -64,42 +64,6 @@ import {
 import { sendCheckInAgreementEmail } from "../utils/checkInAgreementEmail.js";
 import { sendCheckOutInvoiceEmail } from "../utils/checkOutInvoiceEmail.js";
 import { runInBackground } from "../utils/backgroundJob.js";
-
-async function formatInspections(inspections) {
-  return Promise.all(
-    inspections.map(async (insp) => {
-      const doc = formatDoc(insp);
-      const performedBy = await resolveBookingActor(
-        User,
-        insp.performedByUserId ?? insp.conductedBy,
-        insp.performedByRole,
-        insp.performedByName,
-      );
-      const imageUrls = (doc.imageUrls ?? []).map((url) => resolvePublicMediaUrl(url)).filter(Boolean);
-      return {
-        ...doc,
-        imageUrls,
-        resolvedImageUrls: imageUrls,
-        signatureImageUrl: resolvePublicMediaUrl(doc.signatureImageUrl) || doc.signatureImageUrl,
-        signedPdfUrl: resolvePublicMediaUrl(doc.signedPdfUrl) || doc.signedPdfUrl,
-        mainDriver: doc.mainDriver
-          ? {
-              ...doc.mainDriver,
-              licenseImageUrl:
-                resolvePublicMediaUrl(doc.mainDriver.licenseImageUrl) || doc.mainDriver.licenseImageUrl,
-            }
-          : doc.mainDriver,
-        extraDrivers: Array.isArray(doc.extraDrivers)
-          ? doc.extraDrivers.map((driver) => ({
-              ...driver,
-              licenseImageUrl: resolvePublicMediaUrl(driver.licenseImageUrl) || driver.licenseImageUrl,
-            }))
-          : doc.extraDrivers,
-        performedBy,
-      };
-    }),
-  );
-}
 
 async function loadAgreementPdfContext(
   bookingId,
@@ -737,6 +701,137 @@ const listInspectionsByCar = asyncHandler(async (req, res) => {
   return res.status(200).json(new ApiResponse(200, await formatInspections(inspections), "Inspections fetched"));
 });
 
+const CHECKINOUT_CAR_FIELDS = "make model year category transmission dailyRate imageUrl imageUrls";
+const CHECKINOUT_USER_FIELDS = "name email phone";
+const CHECKINOUT_LOCATION_FIELDS = "name";
+const CHECKINOUT_ADMIN_FIELDS = "name role";
+const INSPECTION_BOOKING_FIELDS =
+  "userId carId pickupLocationId dropoffLocationId pickupDate pickupTime returnDate returnTime status totalAmount";
+
+function refId(ref) {
+  if (!ref) return undefined;
+  if (typeof ref === "string") return ref;
+  return ref._id?.toString?.() ?? String(ref);
+}
+
+function populatedDoc(parent, path) {
+  return parent.populated(path) ? formatDoc(parent.get(path)) : null;
+}
+
+function formatCheckInOutBooking(booking, checkIn, checkOut) {
+  const doc = formatDoc(booking);
+  return {
+    ...doc,
+    userId: refId(booking.userId),
+    carId: refId(booking.carId),
+    pickupLocationId: refId(booking.pickupLocationId),
+    dropoffLocationId: refId(booking.dropoffLocationId),
+    user: populatedDoc(booking, "userId"),
+    car: booking.populated("carId") ? enrichCar(booking.get("carId")) : null,
+    pickupLocation: populatedDoc(booking, "pickupLocationId"),
+    dropoffLocation: populatedDoc(booking, "dropoffLocationId"),
+    checkIn: checkIn ?? null,
+    checkOut: checkOut ?? null,
+    checkInPerformedBy: checkIn?.performedBy ?? null,
+    checkOutPerformedBy: checkOut?.performedBy ?? null,
+  };
+}
+
+const CHECKINOUT_BOOKING_POPULATE = [
+  { path: "userId", select: CHECKINOUT_USER_FIELDS },
+  { path: "carId", select: CHECKINOUT_CAR_FIELDS },
+  { path: "pickupLocationId", select: CHECKINOUT_LOCATION_FIELDS },
+  { path: "dropoffLocationId", select: CHECKINOUT_LOCATION_FIELDS },
+];
+
+const listCheckInOutBoard = asyncHandler(async (req, res) => {
+  if (!isStaff(req.user)) {
+    throw new ApiError(403, "Forbidden");
+  }
+
+  const [activeBookings, completedBookings] = await Promise.all([
+    Booking.find({ status: { $in: ["confirmed", "checked_in"] } })
+      .sort({ createdAt: -1 })
+      .populate(CHECKINOUT_BOOKING_POPULATE),
+    Booking.find({ status: "completed" })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .populate(CHECKINOUT_BOOKING_POPULATE),
+  ]);
+  const bookings = [...activeBookings, ...completedBookings];
+  const bookingIds = bookings.map((booking) => booking._id);
+
+  const inspections = await VehicleInspection.find({ bookingId: { $in: bookingIds } })
+    .sort({ createdAt: -1 })
+    .populate("conductedBy", CHECKINOUT_ADMIN_FIELDS)
+    .populate("performedByUserId", CHECKINOUT_ADMIN_FIELDS);
+
+  const formatted = await formatInspections(inspections);
+  const latestByKey = new Map();
+  for (const inspection of formatted) {
+    const bookingId = refId(inspection.bookingId);
+    if (!bookingId) continue;
+    const key = `${bookingId}:${inspection.type}`;
+    if (!latestByKey.has(key)) {
+      latestByKey.set(key, inspection);
+    }
+  }
+
+  const items = bookings.map((booking) => {
+    const id = booking._id.toString();
+    return formatCheckInOutBooking(
+      booking,
+      latestByKey.get(`${id}:check_in`),
+      latestByKey.get(`${id}:check_out`),
+    );
+  });
+
+  return res.status(200).json(new ApiResponse(200, items, "Check-in/out board fetched"));
+});
+
+const getInspectionById = asyncHandler(async (req, res) => {
+  const inspection = await VehicleInspection.findById(req.params.id)
+    .populate({ path: "carId", select: CHECKINOUT_CAR_FIELDS })
+    .populate({
+      path: "bookingId",
+      select: INSPECTION_BOOKING_FIELDS,
+      populate: CHECKINOUT_BOOKING_POPULATE,
+    })
+    .populate("conductedBy", CHECKINOUT_ADMIN_FIELDS)
+    .populate("performedByUserId", CHECKINOUT_ADMIN_FIELDS);
+
+  if (!inspection) {
+    throw new ApiError(404, "Inspection not found");
+  }
+
+  const booking = inspection.populated("bookingId") ? inspection.get("bookingId") : null;
+  const staff = isStaff(req.user);
+  const bookingUserId = booking ? refId(booking.userId) : null;
+  if (!staff && bookingUserId !== req.user._id.toString()) {
+    throw new ApiError(403, "Forbidden");
+  }
+
+  const [formatted] = await formatInspections([inspection]);
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ...formatted,
+        bookingId: refId(inspection.bookingId),
+        carId: refId(inspection.carId),
+        conductedBy: refId(inspection.conductedBy),
+        car: inspection.populated("carId") ? enrichCar(inspection.get("carId")) : null,
+        user: booking ? populatedDoc(booking, "userId") : null,
+        pickupLocation: booking ? populatedDoc(booking, "pickupLocationId") : null,
+        dropoffLocation: booking ? populatedDoc(booking, "dropoffLocationId") : null,
+        admin: populatedDoc(inspection, "conductedBy") ?? populatedDoc(inspection, "performedByUserId"),
+        booking: booking ? formatCheckInOutBooking(booking, null, null) : null,
+      },
+      "Inspection fetched",
+    ),
+  );
+});
+
 const listAllInspections = asyncHandler(async (req, res) => {
   if (!isStaff(req.user)) {
     throw new ApiError(403, "Forbidden");
@@ -761,5 +856,7 @@ export {
   createInspection,
   listInspectionsByBooking,
   listInspectionsByCar,
+  listCheckInOutBoard,
+  getInspectionById,
   listAllInspections,
 };

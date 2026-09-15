@@ -4,6 +4,7 @@ import { isStaff } from "../middlewares/auth.middleware.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { collectUnavailableCarIds } from "../utils/carAvailability.js";
 import { enrichCar, normalizeCarImageFields, sanitizeCarForPublic } from "../utils/enrichCar.js";
 import { normalizeUpdateBody } from "../utils/patchPayload.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
@@ -33,6 +34,38 @@ const listCars = asyncHandler(async (req, res) => {
     return res.status(200).json(new ApiResponse(200, paginatedPayload(cars, result), "Cars fetched"));
   }
   return res.status(200).json(new ApiResponse(200, cars, "Cars fetched"));
+});
+
+const listAvailableCars = asyncHandler(async (req, res) => {
+  const { pickupDate, returnDate, pickupTime, returnTime } = req.query;
+  if (!pickupDate || !returnDate) {
+    throw new ApiError(400, "pickupDate and returnDate are required");
+  }
+
+  const unavailable = await collectUnavailableCarIds({
+    pickupDate,
+    returnDate,
+    pickupTime: pickupTime || "00:00",
+    returnTime: returnTime || "23:59",
+  });
+
+  const match = { isAvailable: true };
+  if (unavailable.size > 0) {
+    match._id = {
+      $nin: [...unavailable]
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id)),
+    };
+  }
+
+  const cars = await Car.find(match).sort({ createdAt: -1 });
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      cars.map((car) => formatCarForRequest(req, car)),
+      "Available cars fetched",
+    ),
+  );
 });
 
 const getCarById = asyncHandler(async (req, res) => {
@@ -70,6 +103,7 @@ const deleteCar = asyncHandler(async (req, res) => {
 
 export {
   listCars,
+  listAvailableCars,
   getCarById,
   createCar,
   updateCar,

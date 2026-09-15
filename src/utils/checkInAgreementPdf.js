@@ -37,27 +37,27 @@ const FUEL_LABELS = {
 };
 
 /**
- * Fallback invoice signature box (page 1). Sits just above the
- * "Renter Signature" underline (measured line y≈232.6 on a typical invoice).
+ * Fallback invoice signature box (page 1). Bottom sits just above the
+ * "Renter Signature" underline.
  */
 export const INVOICE_SIGNATURE_FIELD = {
   pageIndex: 0,
-  x: 47,
-  y: 229,
-  width: 200,
-  height: 20,
+  x: 45,
+  y: 247,
+  width: 210,
+  height: 36,
 };
 
 /**
  * Fallback final signature box. Page is resolved to the sheet that has
- * "By signing below" — not a leftover blank last page. Measured line y≈624.5.
+ * "By signing below" — not a leftover blank last page.
  */
 export const FINAL_SIGNATURE_FIELD = {
   pageIndex: -1,
-  x: 47,
-  y: 617,
-  width: 200,
-  height: 20,
+  x: 45,
+  y: 420,
+  width: 210,
+  height: 36,
 };
 
 /** Fallback Date text above the final-page Date underline (line x≈318, y≈624.5). */
@@ -107,9 +107,9 @@ function replaceBlankRunWithBodyText(fragment, value, { last = false } = {}) {
   );
 }
 
-const SIGNATURE_ABOVE_LINE = 2;
-const SIGNATURE_HEIGHT = 20;
-const SIGNATURE_WIDTH = 200;
+const SIGNATURE_ABOVE_LINE = 3;
+const SIGNATURE_HEIGHT = 36;
+const SIGNATURE_WIDTH = 210;
 
 function escapeXml(value) {
   return String(value ?? "")
@@ -1560,21 +1560,33 @@ function decodePageContents(pdfDoc, page) {
   return Buffer.concat(chunks).toString("latin1");
 }
 
-function decodeTjArray(token) {
-  return [...token.matchAll(/\((?:\\.|[^\\)])*\)/g)]
-    .map((match) => match[0].slice(1, -1))
-    .join("")
+function decodePdfText(token) {
+  return String(token ?? "")
     .replace(/\\n/g, "\n")
     .replace(/\\\(/g, "(")
     .replace(/\\\)/g, ")")
     .replace(/\\\\/g, "\\");
 }
 
+function decodeHexPdfText(hex) {
+  return (hex.match(/[0-9A-Fa-f]{2}/g) ?? [])
+    .map((pair) => String.fromCharCode(Number.parseInt(pair, 16)))
+    .join("")
+    .replace(/[^\x20-\x7E]/g, "");
+}
+
+function decodeTjArray(token) {
+  return [...token.matchAll(/\((?:\\.|[^\\)])*\)/g)]
+    .map((match) => decodePdfText(match[0].slice(1, -1)))
+    .join("")
+    .replace(/[^\x20-\x7E]/g, "");
+}
+
 function extractPageItems(content) {
   const items = [];
   const re =
-    /(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+Tm|\[((?:(?!\]\s*TJ).)*)\]\s*TJ|(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+re/gs;
-  let tm = null;
+    /(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+Tm|(-?[\d.]+)\s+(-?[\d.]+)\s+T[dD]|\[((?:(?!\]\s*TJ).)*)\]\s*TJ|\(((?:\\.|[^\\)])*)\)\s*Tj|<((?:[0-9A-Fa-f]{2})+)>\s*Tj|(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+re|(-?[\d.]+)\s+(-?[\d.]+)\s+m\s+(-?[\d.]+)\s+(-?[\d.]+)\s+l/gs;
+  let tm = { x: 0, y: 0 };
   let match;
   while ((match = re.exec(content))) {
     if (match[1] != null) {
@@ -1582,38 +1594,77 @@ function extractPageItems(content) {
       continue;
     }
     if (match[7] != null) {
-      const text = decodeTjArray(match[7]).replace(/[^\x20-\x7E]/g, "");
-      if (text.trim()) items.push({ kind: "text", x: tm?.x ?? 0, y: tm?.y ?? 0, text });
+      tm = { x: tm.x + Number(match[7]), y: tm.y + Number(match[8]) };
       continue;
     }
-    if (match[8] != null) {
-      const x = Number(match[8]);
-      const y = Number(match[9]);
-      const w = Number(match[10]);
-      const h = Number(match[11]);
-      if (h <= 1.2 && w > 80) items.push({ kind: "hline", x, y, w, h });
+    if (match[9] != null) {
+      const text = decodeTjArray(match[9]);
+      if (text.trim()) items.push({ kind: "text", x: tm.x, y: tm.y, text });
+      continue;
+    }
+    if (match[10] != null) {
+      const text = decodePdfText(match[10]).replace(/[^\x20-\x7E]/g, "");
+      if (text.trim()) items.push({ kind: "text", x: tm.x, y: tm.y, text });
+      continue;
+    }
+    if (match[11] != null) {
+      const text = decodeHexPdfText(match[11]);
+      if (text.trim()) items.push({ kind: "text", x: tm.x, y: tm.y, text });
+      continue;
+    }
+    if (match[12] != null) {
+      const x = Number(match[12]);
+      const y = Number(match[13]);
+      const w = Number(match[14]);
+      const h = Number(match[15]);
+      if (Math.abs(h) <= 1.2 && Math.abs(w) > 80) {
+        items.push({ kind: "hline", x: w < 0 ? x + w : x, y: h < 0 ? y + h : y, w: Math.abs(w), h: Math.abs(h) });
+      }
+      continue;
+    }
+    if (match[16] != null) {
+      const x1 = Number(match[16]);
+      const y1 = Number(match[17]);
+      const x2 = Number(match[18]);
+      const y2 = Number(match[19]);
+      const w = Math.abs(x2 - x1);
+      if (Math.abs(y2 - y1) <= 1.2 && w > 80) {
+        items.push({ kind: "hline", x: Math.min(x1, x2), y: Math.min(y1, y2), w, h: Math.abs(y2 - y1) });
+      }
     }
   }
   return items;
 }
 
-function lineAboveLabel(hlines, label, { xSlop = 40 } = {}) {
+function lineAboveLabel(hlines, label, { xSlop = 48, yMax = 22 } = {}) {
   return hlines
-    .filter((line) => line.y > label.y && line.y < label.y + 16 && line.x < label.x + xSlop)
+    .filter((line) => line.y > label.y + 1 && line.y < label.y + yMax && line.x < label.x + xSlop && line.x + line.w > label.x)
     .sort((a, b) => a.y - b.y)[0];
 }
 
-function signatureBoxFromLine(pageIndex, line, fallback) {
+function isRenterSignatureLabel(label, texts) {
+  const text = label.text.trim();
+  if (/^Renter Signature$/i.test(text)) return true;
+  if (!/^Renter$/i.test(text)) return false;
+  return texts.some(
+    (other) =>
+      /^Signature$/i.test(other.text.trim()) &&
+      Math.abs(other.y - label.y) < 3 &&
+      other.x > label.x,
+  );
+}
+
+function signatureBoxFromLabel(pageIndex, label, line, fallback) {
   return {
     pageIndex,
-    x: (line?.x ?? fallback.x) + 2,
-    y: (line?.y ?? fallback.y) + SIGNATURE_ABOVE_LINE,
+    x: (line?.x ?? label?.x ?? fallback.x) + 2,
+    y: (line?.y ?? (label ? label.y + 9 : fallback.y)) + SIGNATURE_ABOVE_LINE,
     width: Math.min(SIGNATURE_WIDTH, (line?.w ?? fallback.width) - 4),
     height: SIGNATURE_HEIGHT,
   };
 }
 
-function locateAgreementOverlay(pdfDoc) {
+export function locateAgreementOverlay(pdfDoc) {
   const pages = pdfDoc.getPages();
   const invoiceBoxes = [];
   const finalBoxes = [];
@@ -1629,10 +1680,11 @@ function locateAgreementOverlay(pdfDoc) {
     if (isFinalPage) finalPageIndex = i;
 
     for (const label of texts) {
-      if (/^Renter Signature$/.test(label.text.trim())) {
+      if (isRenterSignatureLabel(label, texts)) {
         const line = lineAboveLabel(hlines, label);
-        const box = signatureBoxFromLine(
+        const box = signatureBoxFromLabel(
           i,
+          label,
           line,
           isFinalPage ? FINAL_SIGNATURE_FIELD : INVOICE_SIGNATURE_FIELD,
         );
@@ -1666,11 +1718,20 @@ function locateAgreementOverlay(pdfDoc) {
 }
 
 function drawSignature(page, pngImage, field) {
+  const nativeW = pngImage.width || field.width;
+  const nativeH = pngImage.height || field.height;
+  const aspect = nativeW / Math.max(1, nativeH);
+  let width = field.width;
+  let height = width / aspect;
+  if (height > field.height) {
+    height = field.height;
+    width = height * aspect;
+  }
   page.drawImage(pngImage, {
     x: field.x,
     y: field.y,
-    width: field.width,
-    height: field.height,
+    width,
+    height,
   });
 }
 

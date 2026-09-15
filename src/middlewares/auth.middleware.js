@@ -27,6 +27,9 @@ export const verifyJWT = asyncHandler(async (req, res, next) => {
     if (!user) {
       throw new ApiError(401, "Invalid Access Token");
     }
+    if (user.isActive === false) {
+      throw new ApiError(401, "This account has been deactivated");
+    }
 
     req.user = user;
     next();
@@ -51,7 +54,10 @@ export const optionalAuth = asyncHandler(async (req, res, next) => {
       req.header("Authorization")?.replace("Bearer ", "");
     if (token) {
       const decodedToken = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decodedToken?.userId).select("-password -refreshToken");
+      const user = await User.findById(decodedToken?.userId).select("-password -refreshToken");
+      if (user && user.isActive !== false) {
+        req.user = user;
+      }
     }
     next();
   } catch {

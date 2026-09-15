@@ -1,6 +1,7 @@
 import { Booking } from "../models/booking.model.js";
 import { Car } from "../models/car.model.js";
 import { User } from "../models/user.model.js";
+import { Location } from "../models/location.model.js";
 import { AdditionalService } from "../models/additionalService.model.js";
 import { VehicleInspection } from "../models/vehicleInspection.model.js";
 import { isStaff } from "../middlewares/auth.middleware.js";
@@ -10,6 +11,7 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
 import { formatDoc, formatDocs } from "../utils/formatDoc.js";
 import { enrichCar, sanitizeCarForPublic } from "../utils/enrichCar.js";
+import { collectUnavailableCarIds } from "../utils/carAvailability.js";
 import { rentalPeriodsConflictEitherWay } from "../utils/datesOverlap.js";
 import { calculateRentalDays, isValidRentalPeriod } from "../utils/rentalPricing.js";
 import { calculateServiceCharge } from "../utils/serviceCharge.js";
@@ -58,6 +60,7 @@ import {
 } from "../utils/securityDeposit.js";
 import { sendBillingChargeEmail } from "../utils/billingChargeEmail.js";
 import { uploadBillAttachment } from "./upload.controller.js";
+import { isStoredImageUrl, readStoredFile } from "../utils/localFileStore.js";
 import {
   assignInvoiceNumber,
   attachInvoiceToBillEntry,
@@ -75,6 +78,11 @@ import {
   buildCancellationPreview,
   resolveCancellationPolicy,
 } from "../utils/cancellation.js";
+import {
+  inspectionsForBooking,
+  latestInspectionsByBookingIds,
+  visibleInspectionsForViewer,
+} from "../utils/formatInspection.js";
 
 function queueBookingConfirmationDocuments(bookingId, { sendEmail = true } = {}) {
   runInBackground("Booking confirmation documents", async () => {
@@ -195,41 +203,45 @@ const getUnavailableCarIds = asyncHandler(async (req, res) => {
     return res.status(200).json(new ApiResponse(200, [], "Unavailable cars fetched"));
   }
 
-  const allBookings = await Booking.find();
-  const unavailable = new Set();
-
-  for (const booking of allBookings) {
-    if (!isActiveBooking(booking.status)) continue;
-
-    const conflicts = rentalPeriodsConflictEitherWay(
-      booking.pickupDate,
-      booking.pickupTime,
-      booking.returnDate,
-      booking.returnTime,
-      pickupDate,
-      pickupTime ?? "00:00",
-      returnDate,
-      returnTime ?? "23:59",
-    );
-
-    if (conflicts) {
-      unavailable.add(booking.carId.toString());
-    }
-  }
+  const unavailable = await collectUnavailableCarIds({
+    pickupDate,
+    returnDate,
+    pickupTime: pickupTime ?? "00:00",
+    returnTime: returnTime ?? "23:59",
+  });
 
   return res.status(200).json(new ApiResponse(200, Array.from(unavailable), "Unavailable cars fetched"));
 });
 
-const LIST_LOCATION_FIELDS = "name city";
-const LIST_CUSTOMER_FIELDS = "name email phone";
-const LIST_CAR_FIELDS = "make model year licensePlate";
+const LIST_LOCATION_FIELDS = "name";
+const LIST_CUSTOMER_FIELDS = "name email";
+const LIST_CAR_CORE_FIELDS = "make model year licensePlate";
+const LIST_CAR_IMAGE_FIELDS = "make model year licensePlate category imageUrl imageUrls";
 
-const BOOKING_LIST_POPULATE = [
-  { path: "userId", select: LIST_CUSTOMER_FIELDS },
-  { path: "carId", select: LIST_CAR_FIELDS },
+const MY_BOOKING_POPULATE = [
+  { path: "carId", select: LIST_CAR_IMAGE_FIELDS },
   { path: "pickupLocationId", select: LIST_LOCATION_FIELDS },
   { path: "dropoffLocationId", select: LIST_LOCATION_FIELDS },
 ];
+
+const ADMIN_LIST_POPULATE = [
+  { path: "userId", select: LIST_CUSTOMER_FIELDS },
+  { path: "carId", select: LIST_CAR_CORE_FIELDS },
+  { path: "pickupLocationId", select: LIST_LOCATION_FIELDS },
+  { path: "dropoffLocationId", select: LIST_LOCATION_FIELDS },
+];
+
+const CAR_CALENDAR_BOOKING_POPULATE = [
+  { path: "userId", select: LIST_CUSTOMER_FIELDS },
+  { path: "pickupLocationId", select: LIST_LOCATION_FIELDS },
+  { path: "dropoffLocationId", select: LIST_LOCATION_FIELDS },
+];
+
+const OVERVIEW_BOOKING_POPULATE = [
+  { path: "carId", select: LIST_CAR_CORE_FIELDS },
+];
+
+const CAR_CALENDAR_FIELDS = "make model year licensePlate color category dailyRate imageUrl imageUrls isAvailable";
 
 function populatedSnapshot(booking, path) {
   return booking.populated(path) ? formatDoc(booking.get(path)) : null;
@@ -237,10 +249,11 @@ function populatedSnapshot(booking, path) {
 
 function formatListBooking(booking) {
   const doc = formatBookingWithIds(booking);
+  const car = booking.populated("carId") ? enrichCar(booking.get("carId")) : null;
   return {
     ...doc,
     user: populatedSnapshot(booking, "userId"),
-    car: populatedSnapshot(booking, "carId"),
+    car,
     pickupLocation: populatedSnapshot(booking, "pickupLocationId"),
     dropoffLocation: populatedSnapshot(booking, "dropoffLocationId"),
   };
@@ -255,9 +268,20 @@ const getMyBookings = asyncHandler(async (req, res) => {
   );
   const bookings = await Booking.populate(
     result.docs.map((doc) => Booking.hydrate(doc)),
-    BOOKING_LIST_POPULATE,
+    MY_BOOKING_POPULATE,
   );
-  const items = bookings.map(formatListBooking);
+  const latestByKey = await latestInspectionsByBookingIds(bookings.map((booking) => booking._id));
+  const items = bookings.map((booking) => {
+    const attached = visibleInspectionsForViewer(
+      booking,
+      inspectionsForBooking(latestByKey, String(booking._id)),
+      false,
+    );
+    return {
+      ...formatListBooking(booking),
+      ...attached,
+    };
+  });
   if (wantsPagination(req)) {
     return res.status(200).json(new ApiResponse(200, paginatedPayload(items, result), "Bookings fetched"));
   }
@@ -275,7 +299,7 @@ const getAdminBookings = asyncHandler(async (req, res) => {
   );
   const bookings = await Booking.populate(
     result.docs.map((doc) => Booking.hydrate(doc)),
-    BOOKING_LIST_POPULATE,
+    ADMIN_LIST_POPULATE,
   );
   const items = bookings.map((booking) => {
     const billSummary = computeBillSummary(booking.billEntries);
@@ -291,30 +315,94 @@ const getAdminBookings = asyncHandler(async (req, res) => {
 });
 
 const getAdminBookingsByCar = asyncHandler(async (req, res) => {
-  const car = await Car.findById(req.params.carId);
+  const car = await Car.findById(req.params.carId).select(CAR_CALENDAR_FIELDS);
   if (!car) {
     throw new ApiError(404, "Car not found");
   }
 
-  const bookings = await Booking.find({ carId: req.params.carId }).sort({ pickupDate: 1 });
-  const userIds = [...new Set(bookings.map((b) => b.userId.toString()))];
-  const users = await User.find({ _id: { $in: userIds } });
-  const userMap = new Map(users.map((u) => [u._id.toString(), u]));
+  const bookings = await Booking.find({ carId: req.params.carId })
+    .sort({ pickupDate: 1 })
+    .populate(CAR_CALENDAR_BOOKING_POPULATE);
 
-  return res.status(200).json(new ApiResponse(200, formatDocs(bookings).map((booking) => {
-      const user = userMap.get(booking.userId);
+  return res.status(200).json(new ApiResponse(200, {
+    car: enrichCar(car),
+    bookings: bookings.map((booking) => {
+      const item = formatListBooking(booking);
       return {
-        ...booking,
-        customerName: user?.name ?? user?.email ?? "Unknown customer",
-        customerEmail: user?.email ?? null,
+        ...item,
+        customerName: item.user?.name ?? item.user?.email ?? "Unknown customer",
+        customerEmail: item.user?.email ?? null,
       };
     }),
-    "Car bookings fetched",
-  ));
+  }, "Car bookings fetched"));
 });
 
-const LOCATION_DETAIL_FIELDS = "name address city phone isActive";
-const CUSTOMER_DETAIL_FIELDS = "name email phone role licenseUrl";
+const getAdminOverview = asyncHandler(async (req, res) => {
+  const [
+    totalCars,
+    availableCars,
+    totalBookings,
+    pendingBookings,
+    checkedInBookings,
+    customers,
+    locations,
+    revenueAgg,
+    recentBookings,
+  ] = await Promise.all([
+    Car.countDocuments(),
+    Car.countDocuments({ isAvailable: true }),
+    Booking.countDocuments(),
+    Booking.countDocuments({ status: "pending" }),
+    Booking.countDocuments({ status: "checked_in" }),
+    User.countDocuments({ role: "customer" }),
+    Location.countDocuments(),
+    Booking.aggregate([
+      { $match: { status: { $ne: "cancelled" } } },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    ]),
+    Booking.find()
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .select("pickupDate totalAmount status carId")
+      .populate(OVERVIEW_BOOKING_POPULATE),
+  ]);
+
+  return res.status(200).json(new ApiResponse(200, {
+    stats: {
+      totalCars,
+      availableCars,
+      totalBookings,
+      pendingBookings,
+      checkedInBookings,
+      revenue: revenueAgg[0]?.total ?? 0,
+      customers,
+      locations,
+    },
+    recentBookings: recentBookings.map((booking) => {
+      const car = booking.populated("carId") ? formatDoc(booking.get("carId")) : null;
+      return {
+        _id: booking._id.toString(),
+        pickupDate: booking.pickupDate,
+        totalAmount: booking.totalAmount,
+        status: booking.status,
+        car: car
+          ? {
+              _id: car._id,
+              make: car.make,
+              model: car.model,
+              year: car.year,
+              licensePlate: car.licensePlate,
+            }
+          : null,
+      };
+    }),
+  }, "Overview fetched"));
+});
+
+const LOCATION_DETAIL_FIELDS = "name";
+const CUSTOMER_DETAIL_FIELDS = "name email phone";
+const DETAIL_CAR_FIELDS =
+  "make model year licensePlate color category transmission fuelType seats dailyRate imageUrl imageUrls dailyMileageLimit chargePerExtraKm";
 
 function refId(ref) {
   if (!ref) return undefined;
@@ -373,8 +461,6 @@ const getBookingDetail = asyncHandler(async (req, res) => {
 
   const extraMileageCharge = booking.extraMileageCharge ?? 0;
 
-  const enrichedCar = car ? enrichCar(car) : null;
-
   if (booking.status !== "cancelled") {
     await syncBookingBillEntries(booking, car);
     if (booking.isModified()) {
@@ -388,16 +474,12 @@ const getBookingDetail = asyncHandler(async (req, res) => {
 
   const createdByUserId = booking.createdByUserId ?? booking.userId;
   const createdByRole = booking.createdByRole ?? "customer";
-  const [checkInInspection, checkOutInspection] = await Promise.all([
-    VehicleInspection.findOne({ bookingId: booking._id, type: "check_in" })
-      .sort({ createdAt: -1 })
-      .select("conductedBy performedByUserId performedByName performedByRole"),
-    VehicleInspection.findOne({ bookingId: booking._id, type: "check_out" })
-      .sort({ createdAt: -1 })
-      .select("conductedBy performedByUserId performedByName performedByRole"),
-  ]);
+  const latestByKey = await latestInspectionsByBookingIds([booking._id]);
+  const attached = inspectionsForBooking(latestByKey, String(booking._id));
+  const visibleInspections = visibleInspectionsForViewer(booking, attached, isAdmin);
   const [, createdBy, updatedBy, checkInPerformedBy, checkOutPerformedBy] = await Promise.all([
     booking.populate([
+      { path: "carId", select: DETAIL_CAR_FIELDS },
       { path: "pickupLocationId", select: LOCATION_DETAIL_FIELDS },
       { path: "dropoffLocationId", select: LOCATION_DETAIL_FIELDS },
       { path: "userId", select: CUSTOMER_DETAIL_FIELDS },
@@ -409,24 +491,29 @@ const getBookingDetail = asyncHandler(async (req, res) => {
     resolveBookingActor(
       User,
       booking.checkInPerformedByUserId ??
-        checkInInspection?.performedByUserId ??
-        checkInInspection?.conductedBy,
-      booking.checkInPerformedByRole ?? checkInInspection?.performedByRole,
-      booking.checkInPerformedByName ?? checkInInspection?.performedByName,
+        attached.checkIn?.performedByUserId ??
+        attached.checkIn?.conductedBy,
+      booking.checkInPerformedByRole ?? attached.checkIn?.performedByRole,
+      booking.checkInPerformedByName ?? attached.checkIn?.performedByName,
     ),
     resolveBookingActor(
       User,
       booking.checkOutPerformedByUserId ??
-        checkOutInspection?.performedByUserId ??
-        checkOutInspection?.conductedBy,
-      booking.checkOutPerformedByRole ?? checkOutInspection?.performedByRole,
-      booking.checkOutPerformedByName ?? checkOutInspection?.performedByName,
+        attached.checkOut?.performedByUserId ??
+        attached.checkOut?.conductedBy,
+      booking.checkOutPerformedByRole ?? attached.checkOut?.performedByRole,
+      booking.checkOutPerformedByName ?? attached.checkOut?.performedByName,
     ),
   ]);
 
+  const detailCar = booking.populated("carId") ? enrichCar(booking.get("carId")) : null;
+
   return res.status(200).json(new ApiResponse(200, {
-      booking: formatBookingWithIds(booking),
-      car: enrichedCar ? (isAdmin ? enrichedCar : sanitizeCarForPublic(enrichedCar)) : null,
+      booking: {
+        ...formatBookingWithIds(booking),
+        ...visibleInspections,
+      },
+      car: detailCar ? (isAdmin ? detailCar : sanitizeCarForPublic(detailCar)) : null,
       pickupLocation: booking.populated("pickupLocationId")
         ? formatDoc(booking.pickupLocationId)
         : null,
@@ -449,6 +536,9 @@ const getBookingDetail = asyncHandler(async (req, res) => {
       billEntries,
       billSummary,
       securityDeposit,
+      inspections: visibleInspections.inspections,
+      checkIn: visibleInspections.checkIn,
+      checkOut: visibleInspections.checkOut,
     },
     "Booking detail fetched",
   ));
@@ -1044,6 +1134,24 @@ const addBillEntry = asyncHandler(async (req, res) => {
         message: err?.message,
       });
     }
+  } else if (req.body?.attachmentUrl) {
+    attachmentUrl = String(req.body.attachmentUrl).trim();
+    if (!isStoredImageUrl(attachmentUrl)) {
+      throw new ApiError(400, "Invalid attachment URL");
+    }
+    attachmentName = sanitizeAttachmentName(req.body.attachmentName || "attachment");
+    try {
+      const buffer = await readStoredFile(attachmentUrl);
+      if (buffer) {
+        emailAttachment = {
+          filename: attachmentName,
+          content: buffer,
+          contentType: "application/octet-stream",
+        };
+      }
+    } catch {
+      // Charge still saves; email can go without the ticket file.
+    }
   }
 
   appendBillEntry(booking, {
@@ -1238,6 +1346,7 @@ export {
   getMyBookings,
   getAdminBookings,
   getAdminBookingsByCar,
+  getAdminOverview,
   getBookingDetail,
   getBookingById,
   createBooking,

@@ -4,6 +4,7 @@ import {
   getMyBookings,
   getAdminBookings,
   getAdminBookingsByCar,
+  getAdminOverview,
   getBookingDetail,
   getBookingById,
   createBooking,
@@ -29,6 +30,7 @@ const router = Router();
 router.route("/unavailable").get(getUnavailableCarIds);
 router.route("/my").get(verifyJWT, getMyBookings);
 router.route("/admin").get(verifyJWT, checkRole("admin", "sub_admin"), getAdminBookings);
+router.route("/admin/overview").get(verifyJWT, checkRole("admin", "sub_admin"), getAdminOverview);
 router.route("/admin/car/:carId").get(verifyJWT, checkRole("admin", "sub_admin"), getAdminBookingsByCar);
 router.route("/").post(verifyJWT, createBooking);
 router.route("/admin").post(verifyJWT, checkRole("admin", "sub_admin"), adminCreateBooking);
