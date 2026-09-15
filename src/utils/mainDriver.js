@@ -1,6 +1,5 @@
-function isStoredImageUrl(value) {
-  return typeof value === "string" && /^https?:\/\//i.test(value.trim());
-}
+import { isStoredImageUrl } from "./localFileStore.js";
+
 
 export function validateMainDriverCheckInDetails(mainDriver) {
   if (!mainDriver || typeof mainDriver !== "object") {

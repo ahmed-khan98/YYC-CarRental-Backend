@@ -67,6 +67,15 @@ function publicBaseUrl() {
   ).replace(/\/$/, "");
 }
 
+export function isStoredImageUrl(value) {
+  if (typeof value !== "string") return false;
+  const url = value.trim();
+  if (!url) return false;
+  if (/^https?:\/\//i.test(url)) return true;
+  const path = url.startsWith("/") ? url : `/${url}`;
+  return path.startsWith("/uploads/");
+}
+
 export function resolvePublicMediaUrl(url) {
   if (!url) return url;
   if (/^(https?:|data:|blob:)/i.test(String(url))) return url;

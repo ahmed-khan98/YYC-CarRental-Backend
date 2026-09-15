@@ -1,3 +1,5 @@
+import { isStoredImageUrl } from "./localFileStore.js";
+
 /** Matches the additional-driver add-on by category or service name. */
 export function isExtraDriverService(service) {
   if (!service) return false;
@@ -80,10 +82,6 @@ export function validateExtraDriverCheckInDetails(expectedCount, extraDrivers) {
   }
 
   return null;
-}
-
-function isStoredImageUrl(value) {
-  return typeof value === "string" && /^https?:\/\//i.test(value.trim());
 }
 
 function normalizeExtraDriverCheckInDetails(extraDrivers) {

@@ -9,7 +9,13 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
 import { formatDoc } from "../utils/formatDoc.js";
-import { uploadToStorage, uploadPdfToStorage, fetchStoredPdf, readStoredFile } from "../utils/localFileStore.js";
+import {
+  uploadToStorage,
+  uploadPdfToStorage,
+  fetchStoredPdf,
+  readStoredFile,
+  resolvePublicMediaUrl,
+} from "../utils/localFileStore.js";
 import {
   buildAgreementContext,
   generateCheckInAgreementPdf,
@@ -69,9 +75,26 @@ async function formatInspections(inspections) {
         insp.performedByRole,
         insp.performedByName,
       );
+      const imageUrls = (doc.imageUrls ?? []).map((url) => resolvePublicMediaUrl(url)).filter(Boolean);
       return {
         ...doc,
-        resolvedImageUrls: doc.imageUrls ?? [],
+        imageUrls,
+        resolvedImageUrls: imageUrls,
+        signatureImageUrl: resolvePublicMediaUrl(doc.signatureImageUrl) || doc.signatureImageUrl,
+        signedPdfUrl: resolvePublicMediaUrl(doc.signedPdfUrl) || doc.signedPdfUrl,
+        mainDriver: doc.mainDriver
+          ? {
+              ...doc.mainDriver,
+              licenseImageUrl:
+                resolvePublicMediaUrl(doc.mainDriver.licenseImageUrl) || doc.mainDriver.licenseImageUrl,
+            }
+          : doc.mainDriver,
+        extraDrivers: Array.isArray(doc.extraDrivers)
+          ? doc.extraDrivers.map((driver) => ({
+              ...driver,
+              licenseImageUrl: resolvePublicMediaUrl(driver.licenseImageUrl) || driver.licenseImageUrl,
+            }))
+          : doc.extraDrivers,
         performedBy,
       };
     }),
@@ -225,13 +248,21 @@ function queueCheckInDocuments({ bookingId, inspectionId, previousBillEntries, p
   });
 }
 
-function queueCheckOutDocuments({ bookingId, previousBillEntries, pendingInvoiceEntryIds }) {
+function queueCheckOutDocuments({ bookingId, inspectionId, previousBillEntries, pendingInvoiceEntryIds }) {
   runInBackground("Check-out invoice documents", async () => {
     await attachInspectionInvoices(bookingId, previousBillEntries, pendingInvoiceEntryIds);
     const booking = await Booking.findById(bookingId);
-    if (!booking) return;
-    const checkoutPdfBuffer = await generateCheckOutInvoicePdf(booking);
-    await sendCheckOutInvoiceEmail(booking, checkoutPdfBuffer);
+    if (booking) {
+      const checkoutPdfBuffer = await generateCheckOutInvoicePdf(booking);
+      await sendCheckOutInvoiceEmail(booking, checkoutPdfBuffer);
+    }
+
+    const inspection = inspectionId ? await VehicleInspection.findById(inspectionId) : null;
+    if (!inspection || inspection.signedPdfUrl) return;
+    const pdfBuffer = await generateSavedCheckoutAgreementPdf(inspection);
+    const pdfUpload = await uploadPdfToStorage(pdfBuffer, "check-out-documents");
+    inspection.signedPdfUrl = pdfUpload.secure_url;
+    await inspection.save();
   });
 }
 
@@ -345,7 +376,7 @@ const getSignedCheckInPdf = asyncHandler(async (req, res) => {
 
   const filename = `${inspection.type}-${booking._id}.pdf`;
 
-  if (inspection.type === "check_in" && inspection.signedPdfUrl) {
+  if (inspection.signedPdfUrl) {
     const storedPdf = await fetchStoredPdf(inspection.signedPdfUrl);
     if (storedPdf) {
       return sendPdf(res, storedPdf, filename);
@@ -646,6 +677,7 @@ const createInspection = asyncHandler(async (req, res) => {
   if (type === "check_out") {
     queueCheckOutDocuments({
       bookingId,
+      inspectionId: inspection._id,
       previousBillEntries: invoicePreviousSnapshot,
       pendingInvoiceEntryIds,
     });

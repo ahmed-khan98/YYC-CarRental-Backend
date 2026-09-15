@@ -1,3 +1,4 @@
+import { resolvePublicMediaUrl } from "./localFileStore.js";
 import { calculateTaxAmount, calculateGrandTotal, calculateRentalDays } from "./rentalPricing.js";
 import { calculateServiceCharge } from "./serviceCharge.js";
 import {
@@ -337,9 +338,9 @@ export function formatBillEntries(entries = [], booking = {}) {
       taxAmount: obj.taxAmount ?? undefined,
       totalAmount: obj.totalAmount ?? undefined,
       invoiceNumber: obj.invoiceNumber ?? undefined,
-      invoicePdfUrl: obj.invoicePdfUrl ?? undefined,
+      invoicePdfUrl: resolvePublicMediaUrl(obj.invoicePdfUrl) || obj.invoicePdfUrl || undefined,
       paidVia: obj.paidVia === "deposit" || obj.paidVia === "e_transfer" ? obj.paidVia : undefined,
-      attachmentUrl: obj.attachmentUrl ?? undefined,
+      attachmentUrl: resolvePublicMediaUrl(obj.attachmentUrl) || obj.attachmentUrl || undefined,
       attachmentName: obj.attachmentName ?? undefined,
       createdByUserId: obj.createdByUserId?.toString?.() ?? undefined,
       createdByName: obj.createdByName ?? undefined,
