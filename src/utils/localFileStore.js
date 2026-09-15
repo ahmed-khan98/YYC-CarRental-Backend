@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PROJECT_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 const MIME_EXT = {
   "image/jpeg": ".jpg",
@@ -21,7 +24,14 @@ export function getUploadsRoot() {
   if (process.env.UPLOAD_DIR) {
     return path.resolve(process.env.UPLOAD_DIR);
   }
-  return path.resolve("public/uploads");
+  return path.join(PROJECT_ROOT, "public/uploads");
+}
+
+export function getTempRoot() {
+  if (process.env.UPLOAD_TEMP_DIR) {
+    return path.resolve(process.env.UPLOAD_TEMP_DIR);
+  }
+  return path.join(PROJECT_ROOT, "public/temp");
 }
 
 function sanitizeFolder(folder = "files") {
@@ -92,7 +102,7 @@ export function publicFileUrl(folder, filename) {
 
 export async function ensureUploadsRoot() {
   await fs.mkdir(getUploadsRoot(), { recursive: true });
-  await fs.mkdir(path.resolve("public/temp"), { recursive: true });
+  await fs.mkdir(getTempRoot(), { recursive: true });
 }
 
 export async function saveBuffer(buffer, folder, options = {}) {

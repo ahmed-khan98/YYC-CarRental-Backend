@@ -1,5 +1,7 @@
+import fs from "node:fs";
 import multer from "multer";
 import { ApiError } from "../utils/ApiError.js";
+import { getTempRoot } from "../utils/localFileStore.js";
 
 export const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
 export const IMAGE_PDF_MAX_BYTES = 50 * 1024 * 1024;
@@ -26,7 +28,9 @@ export function assertUploadSize(file) {
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    cb(null, "./public/temp");
+    const dir = getTempRoot();
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
   },
   filename: function (req, file, cb) {
     const unique = Date.now() + "-" + Math.round(Math.random() * Date.now());

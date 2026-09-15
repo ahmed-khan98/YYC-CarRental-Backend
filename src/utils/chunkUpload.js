@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ApiError } from "./ApiError.js";
+import { getTempRoot } from "./localFileStore.js";
 import { VIDEO_MAX_BYTES } from "../middlewares/multer.middleware.js";
 
 const TTL_MS = 30 * 60 * 1000;
 const MAX_CHUNK_BYTES = 800 * 1024;
 
 function sessionsRoot() {
-  return path.resolve("public/temp/chunk-uploads");
+  return path.join(getTempRoot(), "chunk-uploads");
 }
 
 function sessionDir(id) {

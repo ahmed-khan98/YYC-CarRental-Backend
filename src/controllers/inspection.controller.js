@@ -442,6 +442,10 @@ const createInspection = asyncHandler(async (req, res) => {
     mainDriver,
   } = req.body;
 
+  if (type !== "check_in" && type !== "check_out") {
+    throw new ApiError(400, "Invalid inspection type");
+  }
+
   if (type === "check_in" && !signatureDataUrl) {
     throw new ApiError(400, "Customer signature is required to complete check-in");
   }
@@ -479,7 +483,12 @@ const createInspection = asyncHandler(async (req, res) => {
       pendingCheckInPaid: paymentEntry?.amount,
       paymentCutoffAt: issuedAt,
     });
-    const signatureBuffer = parseSignatureDataUrl(signatureDataUrl);
+    let signatureBuffer;
+    try {
+      signatureBuffer = parseSignatureDataUrl(signatureDataUrl);
+    } catch {
+      throw new ApiError(400, "Invalid signature image format");
+    }
     const signatureUpload = await uploadToStorage(signatureBuffer, "check-in-signatures", {
       ext: ".png",
       mimetype: "image/png",
