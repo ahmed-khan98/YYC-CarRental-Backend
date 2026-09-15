@@ -4,7 +4,7 @@ import { isStaff } from "../middlewares/auth.middleware.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { enrichCar, sanitizeCarForPublic } from "../utils/enrichCar.js";
+import { enrichCar, normalizeCarImageFields, sanitizeCarForPublic } from "../utils/enrichCar.js";
 import { normalizeUpdateBody } from "../utils/patchPayload.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
 
@@ -44,15 +44,15 @@ const getCarById = asyncHandler(async (req, res) => {
 });
 
 const createCar = asyncHandler(async (req, res) => {
-  const car = await Car.create({ ...req.body, isAvailable: true });
+  const car = await Car.create({ ...normalizeCarImageFields(req.body), isAvailable: true });
   return res.status(201).json(new ApiResponse(201, enrichCar(car), "Car created"));
 });
 
 const updateCar = asyncHandler(async (req, res) => {
-  const patch = normalizeUpdateBody(req.body, {
+  const patch = normalizeCarImageFields(normalizeUpdateBody(req.body, {
     textKeys: ["description"],
     numberKeys: ["mileage", "dailyMileageLimit", "chargePerExtraKm"],
-  });
+  }));
   const car = await Car.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
   if (!car) {
     throw new ApiError(404, "Car not found");

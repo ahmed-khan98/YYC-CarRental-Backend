@@ -12,6 +12,9 @@ const MIME_EXT = {
   "video/mp4": ".mp4",
   "video/webm": ".webm",
   "video/quicktime": ".mov",
+  "video/3gpp": ".3gp",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
 };
 
 export function getUploadsRoot() {
@@ -57,7 +60,19 @@ function extFromNameOrMime(filename = "", mime = "", fallback = "") {
 }
 
 function publicBaseUrl() {
-  return String(process.env.PUBLIC_BASE_URL || process.env.FILE_PUBLIC_BASE_URL || "").replace(/\/$/, "");
+  return String(
+    process.env.PUBLIC_BASE_URL ||
+      process.env.FILE_PUBLIC_BASE_URL ||
+      "https://api.yyccarrental.com",
+  ).replace(/\/$/, "");
+}
+
+export function resolvePublicMediaUrl(url) {
+  if (!url) return url;
+  if (/^(https?:|data:|blob:)/i.test(String(url))) return url;
+  const path = String(url).startsWith("/") ? String(url) : `/${url}`;
+  if (!path.startsWith("/uploads/")) return url;
+  return `${publicBaseUrl()}${path}`;
 }
 
 export function publicFileUrl(folder, filename) {
