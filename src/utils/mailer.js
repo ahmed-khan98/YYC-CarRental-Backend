@@ -144,21 +144,41 @@ export async function sendMail(mailOptions) {
     throw error;
   }
 
-  try {
-    return await sendMailOnce(mailOptions);
-  } catch (err) {
-    if (isSocketError(err) && getSmtpPort() === 465) {
+  const attempts = smtpConnectionAttempts();
+  let lastErr;
+  for (const attempt of attempts) {
+    try {
+      const info = await sendMailOnce(mailOptions, attempt);
+      if (attempt.host || attempt.port) {
+        console.info("SMTP send used", {
+          host: attempt.host || smtpEnv("SMTP_HOST"),
+          port: attempt.port || getSmtpPort(),
+        });
+      }
+      return info;
+    } catch (err) {
+      lastErr = err;
       resetTransporter();
-      try {
-        return await sendMailOnce(mailOptions, { port: 587, secure: false });
-      } catch (fallbackErr) {
-        resetTransporter();
-        throw classifySendError(fallbackErr);
+      if (!isSocketError(err)) {
+        throw classifySendError(err);
       }
     }
-    resetTransporter();
-    throw classifySendError(err);
   }
+  throw classifySendError(lastErr);
+}
+
+function smtpConnectionAttempts() {
+  const host = smtpEnv("SMTP_HOST");
+  const port = getSmtpPort();
+  const remote = [{ host, port, secure: getSmtpSecure(port) }];
+  if (port !== 587) remote.push({ host, port: 587, secure: false });
+  if (port !== 465) remote.push({ host, port: 465, secure: true });
+  const local = [
+    { host: "localhost", port: 587, secure: false },
+    { host: "127.0.0.1", port: 25, secure: false },
+  ];
+  // Same-server cPanel often blocks outbound 465 to its own public hostname.
+  return process.platform === "win32" ? [...remote, ...local] : [...local, ...remote];
 }
 
 function classifySendError(err) {
@@ -285,11 +305,13 @@ function resetTransporter() {
 }
 
 function getTransporter(overrides = {}) {
-  if (sharedTransporter && !overrides.port) return sharedTransporter;
-
+  const host = overrides.host || smtpEnv("SMTP_HOST");
   const port = Number(overrides.port) || getSmtpPort();
-  const secure = overrides.secure ?? getSmtpSecure(port);
-  const host = smtpEnv("SMTP_HOST");
+  const cacheable = !overrides.host && !overrides.port;
+  if (sharedTransporter && cacheable) return sharedTransporter;
+
+  const local = host === "localhost" || host === "127.0.0.1";
+  const secure = local && port === 25 ? false : overrides.secure ?? getSmtpSecure(port);
   const options = {
     host,
     port,
@@ -299,17 +321,18 @@ function getTransporter(overrides = {}) {
       pass: smtpEnv("SMTP_PASS"),
     },
     authMethod: "LOGIN",
-    family: 4,
-    connectionTimeout: 12_000,
-    greetingTimeout: 12_000,
+    connectionTimeout: 8_000,
+    greetingTimeout: 8_000,
     socketTimeout: 20_000,
-    tls: {
-      servername: host,
-      minVersion: "TLSv1.2",
-    },
   };
 
-  if (shouldRequireTls(port, secure)) {
+  if (local) {
+    options.tls = { rejectUnauthorized: false };
+    if (port === 25) {
+      options.requireTLS = false;
+      options.ignoreTLS = true;
+    }
+  } else if (shouldRequireTls(port, secure)) {
     options.requireTLS = true;
   }
 
@@ -319,7 +342,7 @@ function getTransporter(overrides = {}) {
     resetTransporter();
   });
 
-  if (!overrides.port) {
+  if (cacheable) {
     sharedTransporter = transporter;
   }
   return transporter;
