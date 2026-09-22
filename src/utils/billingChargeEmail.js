@@ -139,7 +139,8 @@ export async function sendBillingChargeEmail({
 }) {
   const bookingId = booking?._id;
   try {
-    const customer = await User.findById(booking.userId);
+    const userId = booking.userId?._id ?? booking.userId;
+    const customer = await User.findById(userId).select("name email");
 
     if (!isValidCustomerEmail(customer?.email)) {
       console.info("Billing charge email skipped: invalid or undeliverable customer email", {
@@ -158,7 +159,13 @@ export async function sendBillingChargeEmail({
       attachment,
     });
 
-    const info = await sendMail(mailOptions);
+    let info;
+    try {
+      info = await sendMail(mailOptions);
+    } catch (err) {
+      console.warn("Billing charge email retrying after send failure:", err?.code || err?.message);
+      info = await sendMail(mailOptions);
+    }
     console.info("Billing charge email sent:", {
       bookingId: String(bookingId),
       to: mailOptions.to,

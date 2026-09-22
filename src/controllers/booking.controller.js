@@ -1173,7 +1173,12 @@ const addBillEntry = asyncHandler(async (req, res) => {
   const newEntry = booking.billEntries[booking.billEntries.length - 1];
   let pdfBuffer = null;
   try {
-    pdfBuffer = await attachInvoiceToBillEntry(booking, newEntry);
+    pdfBuffer = await Promise.race([
+      attachInvoiceToBillEntry(booking, newEntry),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("invoice timeout")), 12_000);
+      }),
+    ]);
     if (booking.isModified()) {
       await booking.save();
     }
@@ -1186,13 +1191,19 @@ const addBillEntry = asyncHandler(async (req, res) => {
 
   if (entryType === "charge") {
     const { remainingAmount } = computeDepositTotals(booking);
-    await sendBillingChargeEmail({
+    const mailed = await sendBillingChargeEmail({
       booking,
       entry: newEntry,
       pdfBuffer,
       remainingDeposit: remainingAmount,
       attachment: emailAttachment,
     });
+    if (mailed?.skipped) {
+      console.error("Billing charge email did not send:", {
+        bookingId: String(booking._id),
+        reason: mailed.reason,
+      });
+    }
   }
 
   return res.status(201).json(new ApiResponse(201, await billEntryResponse(booking), "Bill entry created"));

@@ -1,19 +1,13 @@
 import crypto from "node:crypto";
 import nodemailer from "nodemailer";
 
-// Google Workspace SMTP (set in server/.env):
-// SMTP_HOST=smtp.gmail.com
-// SMTP_PORT=587
-// SMTP_SECURE=false
-// SMTP_USER=booking@yyccarrental.com
-// SMTP_PASS=Google App Password (not the normal Google login password)
-// SMTP_FROM=booking@yyccarrental.com
-// CONTACT_TO=booking@yyccarrental.com
+// SMTP / contact-form env (set in server/.env):
+// SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM
+// CONTACT_TO=booking@yyccarrental.com (admin inbox for the contact form)
 
 const DEFAULT_STAFF_INBOX = "booking@yyccarrental.com";
 const DEFAULT_CONTACT_TO = DEFAULT_STAFF_INBOX;
 const DEFAULT_SMTP_PORT = 465;
-const GOOGLE_SMTP_HOST = "smtp.gmail.com";
 const SMTP_PLACEHOLDER_PASSES = new Set([
   "your_email_password",
   "changeme",
@@ -254,19 +248,7 @@ function listAddresses(value) {
     .filter(Boolean);
 }
 
-function resetTransporter() {
-  if (!sharedTransporter) return;
-  try {
-    sharedTransporter.close();
-  } catch {
-    // ignore close errors on a broken socket
-  }
-  sharedTransporter = null;
-}
-
-function getTransporter() {
-  if (sharedTransporter) return sharedTransporter;
-
+function buildSmtpTransportOptions() {
   const port = getSmtpPort();
   const secure = getSmtpSecure(port);
   const options = {
@@ -279,62 +261,32 @@ function getTransporter() {
     },
     authMethod: "LOGIN",
   };
-
   if (shouldRequireTls(port, secure)) {
     options.requireTLS = true;
   }
+  return options;
+}
 
-  sharedTransporter = nodemailer.createTransport(options);
+function getTransporter() {
+  if (sharedTransporter) return sharedTransporter;
+  sharedTransporter = nodemailer.createTransport(buildSmtpTransportOptions());
   sharedTransporter.on("error", (err) => {
-    console.error("SMTP connection error:", err?.code || err?.message || err);
-    resetTransporter();
+    console.error("SMTP connection error:", err?.message || err);
   });
   return sharedTransporter;
 }
 
-async function sendContactToAdmin(mailOptions) {
-  const user = (smtpEnv("CONTACT_SMTP_USER") || smtpUser()).toLowerCase();
-  const pass = (smtpEnv("CONTACT_SMTP_PASS") || smtpEnv("SMTP_PASS")).replace(/\s+/g, "");
-  const attempts = [
-    { host: GOOGLE_SMTP_HOST, port: 587, secure: false },
-    { host: GOOGLE_SMTP_HOST, port: 465, secure: true },
-  ];
-  let lastErr;
-  for (const attempt of attempts) {
-    const transporter = nodemailer.createTransport({
-      host: attempt.host,
-      port: attempt.port,
-      secure: attempt.secure,
-      auth: { user, pass },
-      requireTLS: !attempt.secure,
-      connectionTimeout: 15_000,
-      greetingTimeout: 15_000,
-      socketTimeout: 20_000,
-    });
+async function sendContactViaOwnTransport(mailOptions) {
+  const transporter = nodemailer.createTransport(buildSmtpTransportOptions());
+  try {
+    return await transporter.sendMail(mailOptions);
+  } finally {
     try {
-      const info = await transporter.sendMail(mailOptions);
-      console.info("Contact email sent via Google Workspace", {
-        host: attempt.host,
-        port: attempt.port,
-        to: mailOptions.to,
-      });
-      return info;
-    } catch (err) {
-      lastErr = err;
-      console.warn("Contact Google SMTP failed", {
-        host: attempt.host,
-        port: attempt.port,
-        code: err?.code || err?.responseCode || "unknown",
-      });
-    } finally {
-      try {
-        transporter.close();
-      } catch {
-        // ignore
-      }
+      transporter.close();
+    } catch {
+      // ignore
     }
   }
-  throw lastErr;
 }
 
 function escapeHtml(value) {
@@ -398,7 +350,7 @@ export async function sendContactEmail({ fullName, email, phone, message }) {
     <p>${escapeHtml(message).replace(/\n/g, "<br/>")}</p>
   `;
 
-  const info = await sendContactToAdmin({
+  const info = await sendContactViaOwnTransport({
     from: {
       name: "YYC Contact Form",
       address: fromAddress,
@@ -420,26 +372,13 @@ export async function sendContactEmail({ fullName, email, phone, message }) {
     },
   });
 
-  const accepted = listAddresses(info.accepted);
-  const rejected = listAddresses(info.rejected);
-  const pending = listAddresses(info.pending);
-
   console.info("Contact email sent:", {
     to,
     from: fromAddress,
     messageId: info.messageId || messageId,
-    accepted,
-    rejected,
-    pending,
+    accepted: listAddresses(info.accepted),
     response: info.response,
   });
-
-  const toNorm = to.toLowerCase();
-  if (rejected.includes(toNorm)) {
-    const error = new Error("SMTP did not accept the booking inbox as a recipient.");
-    error.code = "SMTP_REJECTED";
-    throw error;
-  }
 
   return info;
 }
