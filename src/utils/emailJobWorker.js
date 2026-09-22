@@ -1,5 +1,5 @@
 import { Booking } from "../models/booking.model.js";
-import { EMAIL_JOB_TYPE } from "../models/emailJob.model.js";
+import { EMAIL_JOB_TYPE, EmailJob } from "../models/emailJob.model.js";
 import { VehicleInspection } from "../models/vehicleInspection.model.js";
 import {
   attachInspectionInvoices,
@@ -63,6 +63,31 @@ async function pdfForJob(job, folder, builder) {
   return persistJobPdf(job, built, folder);
 }
 
+async function assertStillSendable(job) {
+  const fresh = await EmailJob.findById(job._id).select("status messageId");
+  if (!fresh || fresh.status === "failed" || fresh.status === "sent") {
+    throw asError("cancelled", "Email job was cancelled");
+  }
+  if (fresh.messageId) {
+    await markEmailJobSent(job, { messageId: fresh.messageId });
+    return false;
+  }
+
+  const alreadySent = await EmailJob.findOne({
+    _id: { $ne: job._id },
+    type: job.type,
+    bookingId: job.bookingId,
+    status: "sent",
+    ...(job.entryId ? { entryId: job.entryId } : {}),
+    ...(job.inspectionId ? { inspectionId: job.inspectionId } : {}),
+  }).select("messageId");
+  if (alreadySent) {
+    await markEmailJobSent(job, { messageId: alreadySent.messageId || "duplicate_skipped" });
+    return false;
+  }
+  return true;
+}
+
 function applySendResult(job, mailed) {
   if (mailed && mailed.skipped === false) {
     return markEmailJobSent(job, mailed.info);
@@ -86,6 +111,7 @@ async function processBookingInvoice(job) {
     return markEmailJobSent(job, { messageId: "skipped_admin" });
   }
 
+  if (!(await assertStillSendable(job))) return;
   return applySendResult(job, await sendBookingConfirmationEmail(booking, pdfBuffer));
 }
 
@@ -115,6 +141,9 @@ async function processCheckInAgreement(job) {
   }
 
   requirePdf(pdfBuffer, "check-in agreement");
+  const inspectionStillThere = await VehicleInspection.exists({ _id: job.inspectionId });
+  if (!inspectionStillThere) throw asError("missing_inspection", "Check-in inspection not found");
+  if (!(await assertStillSendable(job))) return;
   return applySendResult(
     job,
     await sendCheckInAgreementEmail(booking, pdfBuffer),
@@ -132,6 +161,7 @@ async function processCheckOutInvoice(job) {
   if (!booking) throw asError("missing_booking", "Booking not found");
 
   const pdfBuffer = await pdfForJob(job, "checkout-invoices", () => generateCheckOutInvoicePdf(booking));
+  if (!(await assertStillSendable(job))) return;
   const mailed = await sendCheckOutInvoiceEmail(booking, pdfBuffer);
   await applySendResult(job, mailed);
   if (mailed?.skipped) return;
@@ -183,6 +213,7 @@ async function processBillingInvoice(job) {
   }
 
   const { remainingAmount } = computeDepositTotals(booking);
+  if (!(await assertStillSendable(job))) return;
   return applySendResult(
     job,
     await sendBillingChargeEmail({
@@ -199,6 +230,7 @@ async function processEmailJob(job) {
   if (job.messageId && job.status !== "sent") {
     return markEmailJobSent(job, { messageId: job.messageId });
   }
+  if (!(await assertStillSendable(job))) return;
 
   switch (job.type) {
     case EMAIL_JOB_TYPE.BOOKING_INVOICE:

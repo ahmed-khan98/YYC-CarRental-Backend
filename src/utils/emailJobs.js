@@ -17,6 +17,8 @@ const PERMANENT_REASONS = new Set([
   "missing_entry",
   "missing_inspection",
   "unknown_type",
+  "cancelled",
+  "superseded",
 ]);
 
 export function isPermanentEmailFailure(reasonOrErr) {
@@ -29,15 +31,38 @@ export function nextRetryDelayMs(attempts) {
   return RETRY_DELAYS_MS[index];
 }
 
+function isBookingScopedType(type) {
+  return type === "checkin_agreement" || type === "checkout_invoice" || type === "booking_invoice";
+}
+
 function sameOpenJobFilter({ type, bookingId, entryId, inspectionId }) {
   const filter = {
     type,
     bookingId,
     status: { $in: ["pending", "processing"] },
   };
+  if (isBookingScopedType(type)) return filter;
   if (entryId) filter.entryId = entryId;
   if (inspectionId) filter.inspectionId = inspectionId;
   return filter;
+}
+
+export async function cancelEmailJobs({ bookingId, type, reason = "cancelled" }) {
+  return EmailJob.updateMany(
+    {
+      bookingId,
+      ...(type ? { type } : {}),
+      status: { $in: ["pending", "processing", "failed"] },
+    },
+    {
+      $set: {
+        status: "failed",
+        lastError: reason,
+        lastErrorCode: "cancelled",
+      },
+      $unset: { lockedAt: 1 },
+    },
+  );
 }
 
 export async function enqueueEmailJob({
@@ -54,10 +79,31 @@ export async function enqueueEmailJob({
     throw new Error("Email job requires type and bookingId");
   }
 
+  if (isBookingScopedType(type)) {
+    await EmailJob.updateMany(
+      {
+        type,
+        bookingId,
+        status: { $in: ["pending", "processing"] },
+        ...(inspectionId ? { inspectionId: { $ne: inspectionId } } : {}),
+      },
+      {
+        $set: {
+          status: "failed",
+          lastError: "Superseded by a newer job",
+          lastErrorCode: "superseded",
+        },
+        $unset: { lockedAt: 1 },
+      },
+    );
+  }
+
   const existing = await EmailJob.findOne(
     sameOpenJobFilter({ type, bookingId, entryId, inspectionId }),
   );
   if (existing) {
+    if (inspectionId) existing.inspectionId = inspectionId;
+    if (entryId) existing.entryId = entryId;
     if (refresh) {
       existing.pdfUrl = undefined;
       existing.status = "pending";
@@ -66,8 +112,8 @@ export async function enqueueEmailJob({
       existing.extraAttachmentUrl = extraAttachmentUrl || existing.extraAttachmentUrl;
       existing.extraAttachmentName = extraAttachmentName || existing.extraAttachmentName;
       if (payload && Object.keys(payload).length) existing.payload = payload;
-      await existing.save();
     }
+    if (existing.isModified()) await existing.save();
     return existing;
   }
 
@@ -85,9 +131,13 @@ export async function enqueueEmailJob({
 }
 
 export async function recoverStuckEmailJobs(now = new Date()) {
+  await EmailJob.updateMany(
+    { status: "processing", messageId: { $nin: [null, ""] } },
+    { $set: { status: "sent" }, $unset: { lockedAt: 1, nextRetryAt: 1 } },
+  );
   const cutoff = new Date(now.getTime() - LOCK_MS);
   const result = await EmailJob.updateMany(
-    { status: "processing", lockedAt: { $lt: cutoff } },
+    { status: "processing", lockedAt: { $lt: cutoff }, messageId: { $in: [null, ""] } },
     { $set: { status: "pending", nextRetryAt: now }, $unset: { lockedAt: 1 } },
   );
   if (result.modifiedCount) {
@@ -100,6 +150,7 @@ export async function claimNextEmailJob(now = new Date()) {
     {
       status: "pending",
       nextRetryAt: { $lte: now },
+      $or: [{ messageId: { $exists: false } }, { messageId: null }, { messageId: "" }],
     },
     {
       $set: { status: "processing", lockedAt: now },
