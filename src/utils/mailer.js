@@ -1,25 +1,19 @@
 import crypto from "node:crypto";
 import nodemailer from "nodemailer";
 
-// SMTP / contact-form env (set in server/.env):
-// SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM
-// CONTACT_TO=booking@yyccarrental.com (default inbox for contact form)
-// CONTACT_BCC= optional extra copy
-//
-// Default is implicit SSL on 465 (secure: true, no STARTTLS).
-// If AUTH 535 persists after SMTP_PASS is the real cPanel mailbox password,
-// try STARTTLS instead:
-//   SMTP_PORT=587
-//   SMTP_SECURE=false
-// Do not leave SMTP_PASS as your_email_password — that is rejected before send.
-//
-// Sending FROM booking@ TO booking@ can be accepted by SMTP but land in
-// Sent or Junk instead of Inbox on some cPanel hosts. Envelope + Reply-To
-// + Message-ID improve inbound handling; still check Sent and Junk.
+// Google Workspace SMTP (set in server/.env):
+// SMTP_HOST=smtp.gmail.com
+// SMTP_PORT=587
+// SMTP_SECURE=false
+// SMTP_USER=booking@yyccarrental.com
+// SMTP_PASS=Google App Password (not the normal Google login password)
+// SMTP_FROM=booking@yyccarrental.com
+// CONTACT_TO=booking@yyccarrental.com
 
 const DEFAULT_STAFF_INBOX = "booking@yyccarrental.com";
 const DEFAULT_CONTACT_TO = DEFAULT_STAFF_INBOX;
 const DEFAULT_SMTP_PORT = 465;
+const GOOGLE_SMTP_HOST = "smtp.gmail.com";
 const SMTP_PLACEHOLDER_PASSES = new Set([
   "your_email_password",
   "changeme",
@@ -57,7 +51,7 @@ export function getSmtpConfigIssue() {
     return "SMTP_PASS is missing in server/.env.";
   }
   if (SMTP_PLACEHOLDER_PASSES.has(pass.toLowerCase())) {
-    return "SMTP password is still the placeholder. Set SMTP_PASS in server/.env to the real cPanel mailbox password.";
+    return "SMTP password is still the placeholder. Set SMTP_PASS in server/.env.";
   }
   return null;
 }
@@ -90,7 +84,6 @@ function shouldRequireTls(port, secure) {
 
 function smtpUser() {
   const user = smtpEnv("SMTP_USER");
-  // cPanel AUTH treats the username as a literal string; mailbox addresses are lowercase.
   return user.includes("@") ? user.toLowerCase() : user;
 }
 
@@ -121,8 +114,8 @@ export function getStaffReplyTo() {
 }
 
 /**
- * Shared Nodemailer send — booking confirmation and contact form use this
- * transporter. Callers must not set From to the customer address.
+ * Shared Nodemailer send for booking / check-in / check-out / bill emails.
+ * Do not change this path for contact-form delivery.
  */
 export async function sendMail(mailOptions) {
   const configIssue = getSmtpConfigIssue();
@@ -144,50 +137,17 @@ export async function sendMail(mailOptions) {
     throw error;
   }
 
-  const attempts = smtpConnectionAttempts();
-  let lastErr;
-  for (const attempt of attempts) {
-    try {
-      const info = await sendMailOnce(mailOptions, attempt);
-      if (attempt.host || attempt.port) {
-        console.info("SMTP send used", {
-          host: attempt.host || smtpEnv("SMTP_HOST"),
-          port: attempt.port || getSmtpPort(),
-        });
-      }
-      return info;
-    } catch (err) {
-      lastErr = err;
-      resetTransporter();
-      if (!isSocketError(err)) {
-        throw classifySendError(err);
-      }
+  try {
+    const transporter = getTransporter();
+    return await transporter.sendMail(mailOptions);
+  } catch (err) {
+    if (isUndeliverableEmailError(err)) {
+      const error = new Error(err?.message || "Recipient email was rejected");
+      error.code = "EMAIL_UNDELIVERABLE";
+      throw error;
     }
+    throw err;
   }
-  throw classifySendError(lastErr);
-}
-
-function smtpConnectionAttempts() {
-  const host = smtpEnv("SMTP_HOST");
-  const port = getSmtpPort();
-  const remote = [{ host, port, secure: getSmtpSecure(port) }];
-  if (port !== 587) remote.push({ host, port: 587, secure: false });
-  if (port !== 465) remote.push({ host, port: 465, secure: true });
-  const local = [
-    { host: "localhost", port: 587, secure: false },
-    { host: "127.0.0.1", port: 25, secure: false },
-  ];
-  // Same-server cPanel often blocks outbound 465 to its own public hostname.
-  return process.platform === "win32" ? [...remote, ...local] : [...local, ...remote];
-}
-
-function classifySendError(err) {
-  if (isUndeliverableEmailError(err)) {
-    const error = new Error(err?.message || "Recipient email was rejected");
-    error.code = "EMAIL_UNDELIVERABLE";
-    throw error;
-  }
-  return err;
 }
 
 export function isSmtpUnreachableError(err) {
@@ -304,16 +264,13 @@ function resetTransporter() {
   sharedTransporter = null;
 }
 
-function getTransporter(overrides = {}) {
-  const host = overrides.host || smtpEnv("SMTP_HOST");
-  const port = Number(overrides.port) || getSmtpPort();
-  const cacheable = !overrides.host && !overrides.port;
-  if (sharedTransporter && cacheable) return sharedTransporter;
+function getTransporter() {
+  if (sharedTransporter) return sharedTransporter;
 
-  const local = host === "localhost" || host === "127.0.0.1";
-  const secure = local && port === 25 ? false : overrides.secure ?? getSmtpSecure(port);
+  const port = getSmtpPort();
+  const secure = getSmtpSecure(port);
   const options = {
-    host,
+    host: smtpEnv("SMTP_HOST"),
     port,
     secure,
     auth: {
@@ -321,36 +278,63 @@ function getTransporter(overrides = {}) {
       pass: smtpEnv("SMTP_PASS"),
     },
     authMethod: "LOGIN",
-    connectionTimeout: 8_000,
-    greetingTimeout: 8_000,
-    socketTimeout: 20_000,
   };
 
-  if (local) {
-    options.tls = { rejectUnauthorized: false };
-    if (port === 25) {
-      options.requireTLS = false;
-      options.ignoreTLS = true;
-    }
-  } else if (shouldRequireTls(port, secure)) {
+  if (shouldRequireTls(port, secure)) {
     options.requireTLS = true;
   }
 
-  const transporter = nodemailer.createTransport(options);
-  transporter.on("error", (err) => {
+  sharedTransporter = nodemailer.createTransport(options);
+  sharedTransporter.on("error", (err) => {
     console.error("SMTP connection error:", err?.code || err?.message || err);
     resetTransporter();
   });
-
-  if (cacheable) {
-    sharedTransporter = transporter;
-  }
-  return transporter;
+  return sharedTransporter;
 }
 
-async function sendMailOnce(mailOptions, overrides) {
-  const transporter = getTransporter(overrides);
-  return transporter.sendMail(mailOptions);
+async function sendContactToAdmin(mailOptions) {
+  const user = (smtpEnv("CONTACT_SMTP_USER") || smtpUser()).toLowerCase();
+  const pass = (smtpEnv("CONTACT_SMTP_PASS") || smtpEnv("SMTP_PASS")).replace(/\s+/g, "");
+  const attempts = [
+    { host: GOOGLE_SMTP_HOST, port: 587, secure: false },
+    { host: GOOGLE_SMTP_HOST, port: 465, secure: true },
+  ];
+  let lastErr;
+  for (const attempt of attempts) {
+    const transporter = nodemailer.createTransport({
+      host: attempt.host,
+      port: attempt.port,
+      secure: attempt.secure,
+      auth: { user, pass },
+      requireTLS: !attempt.secure,
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 20_000,
+    });
+    try {
+      const info = await transporter.sendMail(mailOptions);
+      console.info("Contact email sent via Google Workspace", {
+        host: attempt.host,
+        port: attempt.port,
+        to: mailOptions.to,
+      });
+      return info;
+    } catch (err) {
+      lastErr = err;
+      console.warn("Contact Google SMTP failed", {
+        host: attempt.host,
+        port: attempt.port,
+        code: err?.code || err?.responseCode || "unknown",
+      });
+    } finally {
+      try {
+        transporter.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+  throw lastErr;
 }
 
 function escapeHtml(value) {
@@ -388,7 +372,7 @@ export async function sendContactEmail({ fullName, email, phone, message }) {
     throw error;
   }
 
-  const to = getContactTo();
+  const to = DEFAULT_CONTACT_TO;
   const smtpAuthUser = smtpUser();
   const fromAddress = getFromAddress();
   const bcc = getContactBcc();
@@ -414,7 +398,7 @@ export async function sendContactEmail({ fullName, email, phone, message }) {
     <p>${escapeHtml(message).replace(/\n/g, "<br/>")}</p>
   `;
 
-  const info = await sendMail({
+  const info = await sendContactToAdmin({
     from: {
       name: "YYC Contact Form",
       address: fromAddress,
