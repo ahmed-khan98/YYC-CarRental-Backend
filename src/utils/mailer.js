@@ -132,8 +132,7 @@ export async function sendMail(mailOptions) {
   }
 
   try {
-    const transporter = getTransporter();
-    return await transporter.sendMail(mailOptions);
+    return await sendWithSmtpFallback(mailOptions);
   } catch (err) {
     if (isUndeliverableEmailError(err)) {
       const error = new Error(err?.message || "Recipient email was rejected");
@@ -175,6 +174,8 @@ const NON_DELIVERABLE_DOMAINS = new Set([
 ]);
 
 let sharedTransporter;
+let sharedTransportKey = "";
+let preferredSmtpTarget = null;
 
 export function isValidEmailAddress(value) {
   const email = String(value || "").trim();
@@ -248,48 +249,132 @@ function listAddresses(value) {
     .filter(Boolean);
 }
 
-function buildSmtpTransportOptions() {
-  const port = getSmtpPort();
-  const secure = getSmtpSecure(port);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+function isLoopbackHost(host) {
+  return LOOPBACK_HOSTS.has(String(host || "").toLowerCase());
+}
+
+function smtpTargetKey(target) {
+  return `${target.host}:${target.port}`;
+}
+
+function buildSmtpTransportOptions({ host, port } = {}) {
+  const resolvedHost = host || smtpEnv("SMTP_HOST");
+  const resolvedPort = port ?? getSmtpPort();
+  const secure = getSmtpSecure(resolvedPort);
+  const configuredHost = smtpEnv("SMTP_HOST");
   const options = {
-    host: smtpEnv("SMTP_HOST"),
-    port,
+    host: resolvedHost,
+    port: resolvedPort,
     secure,
+    family: 4,
     auth: {
       user: smtpUser(),
       pass: smtpEnv("SMTP_PASS"),
     },
     authMethod: "LOGIN",
-    connectionTimeout: 12_000,
-    greetingTimeout: 12_000,
-    socketTimeout: 25_000,
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 30_000,
   };
-  if (shouldRequireTls(port, secure)) {
+  if (shouldRequireTls(resolvedPort, secure)) {
     options.requireTLS = true;
+  }
+  // Connecting to 127.0.0.1 still needs the public hostname for the TLS cert.
+  if (isLoopbackHost(resolvedHost) && configuredHost && !isLoopbackHost(configuredHost)) {
+    options.tls = { ...(options.tls || {}), servername: configuredHost };
   }
   return options;
 }
 
-function getTransporter() {
-  if (sharedTransporter) return sharedTransporter;
-  sharedTransporter = nodemailer.createTransport(buildSmtpTransportOptions());
-  sharedTransporter.on("error", (err) => {
+function smtpFallbackTargets() {
+  const primaryHost = smtpEnv("SMTP_HOST");
+  const primaryPort = getSmtpPort();
+  const altPort = primaryPort === 465 ? 587 : 465;
+  const targets = [{ host: primaryHost, port: primaryPort }];
+  if (altPort !== primaryPort) {
+    targets.push({ host: primaryHost, port: altPort });
+  }
+  if (!isLoopbackHost(primaryHost)) {
+    targets.push({ host: "127.0.0.1", port: primaryPort });
+    if (altPort !== primaryPort) {
+      targets.push({ host: "127.0.0.1", port: altPort });
+    }
+  }
+  const seen = new Set();
+  return targets.filter((target) => {
+    const key = smtpTargetKey(target);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function createTransporter(options) {
+  const transporter = nodemailer.createTransport(options);
+  transporter.on("error", (err) => {
     console.error("SMTP connection error:", err?.message || err);
   });
+  return transporter;
+}
+
+function closeSharedTransporter() {
+  if (!sharedTransporter) return;
+  try {
+    sharedTransporter.close();
+  } catch {
+    // ignore
+  }
+  sharedTransporter = null;
+  sharedTransportKey = "";
+}
+
+function getTransporter(options = buildSmtpTransportOptions()) {
+  const key = smtpTargetKey(options);
+  if (sharedTransporter && sharedTransportKey === key) return sharedTransporter;
+  closeSharedTransporter();
+  sharedTransporter = createTransporter(options);
+  sharedTransportKey = key;
   return sharedTransporter;
 }
 
-async function sendContactViaOwnTransport(mailOptions) {
-  const transporter = nodemailer.createTransport(buildSmtpTransportOptions());
-  try {
-    return await transporter.sendMail(mailOptions);
-  } finally {
+async function sendWithSmtpFallback(mailOptions) {
+  const configured = smtpFallbackTargets();
+  const targets = preferredSmtpTarget
+    ? [
+        preferredSmtpTarget,
+        ...configured.filter((target) => smtpTargetKey(target) !== smtpTargetKey(preferredSmtpTarget)),
+      ]
+    : configured;
+
+  let lastError;
+  for (const target of targets) {
+    const options = buildSmtpTransportOptions(target);
     try {
-      transporter.close();
-    } catch {
-      // ignore
+      const info = await getTransporter(options).sendMail(mailOptions);
+      if (!preferredSmtpTarget || smtpTargetKey(preferredSmtpTarget) !== smtpTargetKey(target)) {
+        preferredSmtpTarget = target;
+        console.info("SMTP connected:", smtpTargetKey(target));
+      }
+      return info;
+    } catch (err) {
+      lastError = err;
+      if (!isSmtpUnreachableError(err)) throw err;
+      console.warn("SMTP unreachable, trying next target:", {
+        host: target.host,
+        port: target.port,
+        code: err?.code,
+        message: err?.message,
+      });
+      closeSharedTransporter();
     }
   }
+  throw lastError;
+}
+
+async function sendContactViaOwnTransport(mailOptions) {
+  return sendWithSmtpFallback(mailOptions);
 }
 
 function escapeHtml(value) {

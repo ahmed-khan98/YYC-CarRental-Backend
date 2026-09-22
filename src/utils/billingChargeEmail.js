@@ -5,6 +5,7 @@ import {
   getSmtpFrom,
   getStaffReplyTo,
   isDeliverableEmailAddress,
+  isSmtpUnreachableError,
   logCustomerEmailFailure,
   sendMail,
 } from "./mailer.js";
@@ -170,6 +171,7 @@ export async function sendBillingChargeEmail({
     try {
       info = await sendMail(mailOptions);
     } catch (err) {
+      if (isSmtpUnreachableError(err)) throw err;
       console.warn("Billing charge email retrying after send failure:", err?.code || err?.message);
       info = await sendMail(mailOptions);
     }
