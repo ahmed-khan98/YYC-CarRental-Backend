@@ -78,7 +78,13 @@ const refreshToken = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Refresh token required");
   }
 
-  const payload = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+  let payload;
+  try {
+    payload = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+  } catch {
+    throw new ApiError(401, "Invalid refresh token");
+  }
+
   const user = await User.findById(payload.userId).select("+refreshToken");
   if (!user || user.refreshToken !== token || user.isActive === false) {
     throw new ApiError(401, "Invalid refresh token");

@@ -35,15 +35,24 @@ function sanitizeSmtpEnvValue(raw) {
   return value;
 }
 
-for (const key of SMTP_ENV_KEYS) {
+const JWT_ENV_KEYS = ["JWT_SECRET", "JWT_REFRESH_SECRET"];
+
+for (const key of [...SMTP_ENV_KEYS, ...JWT_ENV_KEYS]) {
   if (process.env[key] == null) continue;
   process.env[key] = sanitizeSmtpEnvValue(process.env[key]);
 }
 
-// Stable dev defaults so tokens stay valid across server restarts when .env is missing values.
+const isProduction = process.env.NODE_ENV === "production";
+
 if (!process.env.JWT_SECRET) {
+  if (isProduction) {
+    throw new Error("JWT_SECRET is missing. Set it in the VPS .env before starting.");
+  }
   process.env.JWT_SECRET = "yyc-dev-jwt-secret";
 }
 if (!process.env.JWT_REFRESH_SECRET) {
+  if (isProduction) {
+    throw new Error("JWT_REFRESH_SECRET is missing. Set it in the VPS .env before starting.");
+  }
   process.env.JWT_REFRESH_SECRET = "yyc-dev-refresh-secret";
 }

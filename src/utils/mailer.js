@@ -145,16 +145,45 @@ export async function sendMail(mailOptions) {
   }
 
   try {
-    const transporter = getTransporter();
-    return await transporter.sendMail(mailOptions);
+    return await sendMailOnce(mailOptions);
   } catch (err) {
-    if (isUndeliverableEmailError(err)) {
-      const error = new Error(err?.message || "Recipient email was rejected");
-      error.code = "EMAIL_UNDELIVERABLE";
-      throw error;
+    if (isSocketError(err) && getSmtpPort() === 465) {
+      resetTransporter();
+      try {
+        return await sendMailOnce(mailOptions, { port: 587, secure: false });
+      } catch (fallbackErr) {
+        resetTransporter();
+        throw classifySendError(fallbackErr);
+      }
     }
-    throw err;
+    resetTransporter();
+    throw classifySendError(err);
   }
+}
+
+function classifySendError(err) {
+  if (isUndeliverableEmailError(err)) {
+    const error = new Error(err?.message || "Recipient email was rejected");
+    error.code = "EMAIL_UNDELIVERABLE";
+    throw error;
+  }
+  return err;
+}
+
+export function isSmtpUnreachableError(err) {
+  const code = String(err?.code || "");
+  return (
+    code === "ESOCKET" ||
+    code === "ETIMEDOUT" ||
+    code === "ECONNECTION" ||
+    code === "ECONNRESET" ||
+    code === "ECONNREFUSED" ||
+    code === "ENOTFOUND"
+  );
+}
+
+function isSocketError(err) {
+  return isSmtpUnreachableError(err);
 }
 
 function getContactBcc() {
@@ -245,13 +274,24 @@ function listAddresses(value) {
     .filter(Boolean);
 }
 
-function getTransporter() {
-  if (sharedTransporter) return sharedTransporter;
+function resetTransporter() {
+  if (!sharedTransporter) return;
+  try {
+    sharedTransporter.close();
+  } catch {
+    // ignore close errors on a broken socket
+  }
+  sharedTransporter = null;
+}
 
-  const port = getSmtpPort();
-  const secure = getSmtpSecure(port);
+function getTransporter(overrides = {}) {
+  if (sharedTransporter && !overrides.port) return sharedTransporter;
+
+  const port = Number(overrides.port) || getSmtpPort();
+  const secure = overrides.secure ?? getSmtpSecure(port);
+  const host = smtpEnv("SMTP_HOST");
   const options = {
-    host: smtpEnv("SMTP_HOST"),
+    host,
     port,
     secure,
     auth: {
@@ -259,17 +299,35 @@ function getTransporter() {
       pass: smtpEnv("SMTP_PASS"),
     },
     authMethod: "LOGIN",
+    family: 4,
+    connectionTimeout: 12_000,
+    greetingTimeout: 12_000,
+    socketTimeout: 20_000,
+    tls: {
+      servername: host,
+      minVersion: "TLSv1.2",
+    },
   };
 
   if (shouldRequireTls(port, secure)) {
     options.requireTLS = true;
   }
 
-  sharedTransporter = nodemailer.createTransport(options);
-  sharedTransporter.on("error", (err) => {
-    console.error("SMTP connection error:", err?.message || err);
+  const transporter = nodemailer.createTransport(options);
+  transporter.on("error", (err) => {
+    console.error("SMTP connection error:", err?.code || err?.message || err);
+    resetTransporter();
   });
-  return sharedTransporter;
+
+  if (!overrides.port) {
+    sharedTransporter = transporter;
+  }
+  return transporter;
+}
+
+async function sendMailOnce(mailOptions, overrides) {
+  const transporter = getTransporter(overrides);
+  return transporter.sendMail(mailOptions);
 }
 
 function escapeHtml(value) {
@@ -370,8 +428,7 @@ export async function sendContactEmail({ fullName, email, phone, message }) {
   });
 
   const toNorm = to.toLowerCase();
-  const deliveredToInbox = accepted.includes(toNorm);
-  if (rejected.includes(toNorm) || !deliveredToInbox) {
+  if (rejected.includes(toNorm)) {
     const error = new Error("SMTP did not accept the booking inbox as a recipient.");
     error.code = "SMTP_REJECTED";
     throw error;

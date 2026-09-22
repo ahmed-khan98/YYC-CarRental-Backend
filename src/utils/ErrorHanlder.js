@@ -10,17 +10,30 @@ const ErrorHandler = (err, req, res, next) => {
       errors: err.errors,
       data: err.data,
     });
-  } else {
-    console.error(err);
-    res.status(500).json({
+    return;
+  }
+
+  if (err?.name === "JsonWebTokenError" || err?.name === "TokenExpiredError") {
+    res.status(401).json({
       status: "error",
-      statusCode: 500,
-      message: "Internal Server Error",
+      statusCode: 401,
+      message: "Invalid or expired token",
       success: false,
       errors: [],
       data: null,
     });
+    return;
   }
+
+  console.error(err);
+  res.status(500).json({
+    status: "error",
+    statusCode: 500,
+    message: "Internal Server Error",
+    success: false,
+    errors: [],
+    data: null,
+  });
 };
 
 export { ErrorHandler };
