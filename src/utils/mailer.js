@@ -260,6 +260,9 @@ function buildSmtpTransportOptions() {
       pass: smtpEnv("SMTP_PASS"),
     },
     authMethod: "LOGIN",
+    connectionTimeout: 12_000,
+    greetingTimeout: 12_000,
+    socketTimeout: 25_000,
   };
   if (shouldRequireTls(port, secure)) {
     options.requireTLS = true;

@@ -1,0 +1,154 @@
+import { EmailJob } from "../models/emailJob.model.js";
+
+const RETRY_DELAYS_MS = [
+  60_000,
+  5 * 60_000,
+  15 * 60_000,
+  60 * 60_000,
+  6 * 60 * 60_000,
+];
+const LOCK_MS = 4 * 60_000;
+const PERMANENT_REASONS = new Set([
+  "no_email",
+  "undeliverable",
+  "INVALID_RECIPIENT",
+  "EMAIL_UNDELIVERABLE",
+  "missing_booking",
+  "missing_entry",
+  "missing_inspection",
+  "unknown_type",
+]);
+
+export function isPermanentEmailFailure(reasonOrErr) {
+  const reason = String(reasonOrErr?.reason || reasonOrErr?.code || reasonOrErr || "");
+  return PERMANENT_REASONS.has(reason);
+}
+
+export function nextRetryDelayMs(attempts) {
+  const index = Math.max(0, Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1));
+  return RETRY_DELAYS_MS[index];
+}
+
+function sameOpenJobFilter({ type, bookingId, entryId, inspectionId }) {
+  const filter = {
+    type,
+    bookingId,
+    status: { $in: ["pending", "processing"] },
+  };
+  if (entryId) filter.entryId = entryId;
+  if (inspectionId) filter.inspectionId = inspectionId;
+  return filter;
+}
+
+export async function enqueueEmailJob({
+  type,
+  bookingId,
+  entryId,
+  inspectionId,
+  extraAttachmentUrl,
+  extraAttachmentName,
+  payload = {},
+  refresh = false,
+}) {
+  if (!type || !bookingId) {
+    throw new Error("Email job requires type and bookingId");
+  }
+
+  const existing = await EmailJob.findOne(
+    sameOpenJobFilter({ type, bookingId, entryId, inspectionId }),
+  );
+  if (existing) {
+    if (refresh) {
+      existing.pdfUrl = undefined;
+      existing.status = "pending";
+      existing.nextRetryAt = new Date();
+      existing.lockedAt = undefined;
+      existing.extraAttachmentUrl = extraAttachmentUrl || existing.extraAttachmentUrl;
+      existing.extraAttachmentName = extraAttachmentName || existing.extraAttachmentName;
+      if (payload && Object.keys(payload).length) existing.payload = payload;
+      await existing.save();
+    }
+    return existing;
+  }
+
+  return EmailJob.create({
+    type,
+    bookingId,
+    entryId,
+    inspectionId,
+    extraAttachmentUrl,
+    extraAttachmentName,
+    payload,
+    status: "pending",
+    nextRetryAt: new Date(),
+  });
+}
+
+export async function recoverStuckEmailJobs(now = new Date()) {
+  const cutoff = new Date(now.getTime() - LOCK_MS);
+  const result = await EmailJob.updateMany(
+    { status: "processing", lockedAt: { $lt: cutoff } },
+    { $set: { status: "pending", nextRetryAt: now }, $unset: { lockedAt: 1 } },
+  );
+  if (result.modifiedCount) {
+    console.warn("Email job worker requeued stuck jobs:", result.modifiedCount);
+  }
+}
+
+export async function claimNextEmailJob(now = new Date()) {
+  return EmailJob.findOneAndUpdate(
+    {
+      status: "pending",
+      nextRetryAt: { $lte: now },
+    },
+    {
+      $set: { status: "processing", lockedAt: now },
+    },
+    { sort: { nextRetryAt: 1, createdAt: 1 }, new: true },
+  );
+}
+
+export async function markEmailJobSent(job, info) {
+  job.status = "sent";
+  job.messageId = info?.messageId || job.messageId;
+  job.lastError = undefined;
+  job.lastErrorCode = undefined;
+  job.lockedAt = undefined;
+  job.nextRetryAt = undefined;
+  await job.save();
+}
+
+export async function markEmailJobFailure(job, err, { permanent = false } = {}) {
+  const attempts = (job.attempts || 0) + 1;
+  const reason = err?.reason || err?.code || "";
+  const giveUp = permanent || isPermanentEmailFailure(err) || attempts >= (job.maxAttempts || 10);
+
+  job.attempts = attempts;
+  job.lastError = String(err?.message || err).slice(0, 500);
+  job.lastErrorCode = String(reason || (giveUp ? "failed" : "retry")).slice(0, 80);
+  job.lockedAt = undefined;
+
+  if (giveUp) {
+    job.status = "failed";
+    console.error("Email job failed permanently:", {
+      id: String(job._id),
+      type: job.type,
+      bookingId: String(job.bookingId),
+      attempts,
+      message: job.lastError,
+    });
+  } else {
+    job.status = "pending";
+    job.nextRetryAt = new Date(Date.now() + nextRetryDelayMs(attempts));
+    console.warn("Email job retry scheduled:", {
+      id: String(job._id),
+      type: job.type,
+      bookingId: String(job.bookingId),
+      attempts,
+      nextRetryAt: job.nextRetryAt,
+      message: job.lastError,
+    });
+  }
+
+  await job.save();
+}

@@ -52,18 +52,15 @@ import {
 import {
   applySecurityDepositOnCheckIn,
   assertDepositPaymentAllowed,
-  computeDepositTotals,
   formatSecurityDeposit,
   normalizePaidVia,
   persistSecurityDepositStatus,
   refundSecurityDeposit,
 } from "../utils/securityDeposit.js";
-import { sendBillingChargeEmail } from "../utils/billingChargeEmail.js";
 import { uploadBillAttachment } from "./upload.controller.js";
-import { isStoredImageUrl, readStoredFile } from "../utils/localFileStore.js";
+import { isStoredImageUrl } from "../utils/localFileStore.js";
 import {
   assignInvoiceNumber,
-  attachInvoiceToBillEntry,
   attachInvoicesForChangedEntries,
   snapshotBillEntryState,
   buildFullInvoiceNumber,
@@ -71,8 +68,8 @@ import {
   generateEntryInvoicePdf,
   generateFullInvoicePdf,
 } from "../utils/billInvoicePdf.js";
-import { sendBookingConfirmationEmail } from "../utils/bookingConfirmationEmail.js";
-import { runInBackground } from "../utils/backgroundJob.js";
+import { EMAIL_JOB_TYPE } from "../models/emailJob.model.js";
+import { enqueueEmailJob } from "../utils/emailJobs.js";
 import {
   applyUserCancellationBilling,
   buildCancellationPreview,
@@ -85,18 +82,12 @@ import {
 } from "../utils/formatInspection.js";
 
 function queueBookingConfirmationDocuments(bookingId, { sendEmail = true } = {}) {
-  runInBackground("Booking confirmation documents", async () => {
-    const fresh = await Booking.findById(bookingId);
-    if (!fresh) return;
-    await attachInvoicesForChangedEntries(fresh, []);
-    await fresh.save();
-    if (!sendEmail) {
-      console.info("Booking confirmation email skipped: admin-created booking", {
-        bookingId: String(bookingId),
-      });
-      return;
-    }
-    await sendBookingConfirmationEmail(fresh);
+  return enqueueEmailJob({
+    type: EMAIL_JOB_TYPE.BOOKING_INVOICE,
+    bookingId,
+    payload: { sendEmail },
+  }).catch((err) => {
+    console.error("Failed to enqueue booking invoice email:", err?.message || err);
   });
 }
 
@@ -1049,6 +1040,15 @@ async function securityDepositExtras(booking) {
   return checkOut?.createdAt ? { checkOutAt: checkOut.createdAt } : {};
 }
 
+function billEntryResponseSync(booking) {
+  return {
+    booking: formatDoc(booking),
+    billEntries: formatBillEntries(booking.billEntries, booking),
+    billSummary: computeBillSummary(booking.billEntries),
+    securityDeposit: formatSecurityDeposit(booking),
+  };
+}
+
 async function billEntryResponse(booking) {
   return {
     booking: formatDoc(booking),
@@ -1058,6 +1058,18 @@ async function billEntryResponse(booking) {
   };
 }
 
+function queueBillingInvoiceEmail(bookingId, entryId, extras = {}) {
+  return enqueueEmailJob({
+    type: EMAIL_JOB_TYPE.BILLING_INVOICE,
+    bookingId,
+    entryId,
+    extraAttachmentUrl: extras.attachmentUrl,
+    extraAttachmentName: extras.attachmentName,
+    refresh: extras.refresh === true,
+  }).catch((err) => {
+    console.error("Failed to enqueue billing invoice email:", err?.message || err);
+  });
+}
 
 function sanitizeAttachmentName(name) {
   const raw = String(name || "attachment").trim() || "attachment";
@@ -1140,18 +1152,6 @@ const addBillEntry = asyncHandler(async (req, res) => {
       throw new ApiError(400, "Invalid attachment URL");
     }
     attachmentName = sanitizeAttachmentName(req.body.attachmentName || "attachment");
-    try {
-      const buffer = await readStoredFile(attachmentUrl);
-      if (buffer) {
-        emailAttachment = {
-          filename: attachmentName,
-          content: buffer,
-          contentType: "application/octet-stream",
-        };
-      }
-    } catch {
-      // Charge still saves; email can go without the ticket file.
-    }
   }
 
   appendBillEntry(booking, {
@@ -1171,42 +1171,16 @@ const addBillEntry = asyncHandler(async (req, res) => {
   await booking.save();
 
   const newEntry = booking.billEntries[booking.billEntries.length - 1];
-  let pdfBuffer = null;
-  try {
-    pdfBuffer = await Promise.race([
-      attachInvoiceToBillEntry(booking, newEntry),
-      new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("invoice timeout")), 12_000);
-      }),
-    ]);
-    if (booking.isModified()) {
-      await booking.save();
-    }
-  } catch (err) {
-    console.error("Bill entry invoice failed:", {
-      bookingId: String(booking._id),
-      message: err?.message,
-    });
-  }
+  // Reply as soon as Mongo has the charge. Invoice PDF + customer email can take
+  // minutes on the VPS (LibreOffice / SMTP) and must not block this request.
+  res.status(201).json(new ApiResponse(201, billEntryResponseSync(booking), "Bill entry created"));
 
   if (entryType === "charge") {
-    const { remainingAmount } = computeDepositTotals(booking);
-    const mailed = await sendBillingChargeEmail({
-      booking,
-      entry: newEntry,
-      pdfBuffer,
-      remainingDeposit: remainingAmount,
-      attachment: emailAttachment,
+    queueBillingInvoiceEmail(booking._id, newEntry._id, {
+      attachmentUrl,
+      attachmentName,
     });
-    if (mailed?.skipped) {
-      console.error("Billing charge email did not send:", {
-        bookingId: String(booking._id),
-        reason: mailed.reason,
-      });
-    }
   }
-
-  return res.status(201).json(new ApiResponse(201, await billEntryResponse(booking), "Bill entry created"));
 });
 
 const updateBillEntry = asyncHandler(async (req, res) => {
@@ -1254,17 +1228,27 @@ const updateBillEntry = asyncHandler(async (req, res) => {
     if (resolvedPaidVia) entry.paidVia = resolvedPaidVia;
   }
 
-  await attachInvoiceToBillEntry(booking, entry);
-
   const summary = computeBillSummary(booking.billEntries);
   booking.totalAmount = summary.totalBill;
   booking.paymentStatus =
     summary.totalUnpaid <= 0 && summary.totalBill > 0 ? "paid" : "pending";
   persistSecurityDepositStatus(booking);
 
+  if (entry.entryType === "charge") {
+    entry.invoicePdfUrl = undefined;
+  }
+
   Object.assign(booking, staffUpdatedByFields(req.user));
   await booking.save();
-  return res.status(200).json(new ApiResponse(200, await billEntryResponse(booking), "Bill updated"));
+  res.status(200).json(new ApiResponse(200, billEntryResponseSync(booking), "Bill updated"));
+
+  if (entry.entryType === "charge") {
+    queueBillingInvoiceEmail(booking._id, entry._id, {
+      attachmentUrl: entry.attachmentUrl,
+      attachmentName: entry.attachmentName,
+      refresh: true,
+    });
+  }
 });
 
 const getFullInvoicePdf = asyncHandler(async (req, res) => {

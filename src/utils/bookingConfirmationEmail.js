@@ -160,9 +160,14 @@ export function buildBookingConfirmationMailOptions({
   };
 }
 
-export async function sendBookingConfirmationEmail(booking) {
+export async function sendBookingConfirmationEmail(booking, invoicePdfBuffer) {
   const bookingId = booking?._id;
   try {
+    const pdfBuffer = invoicePdfBuffer || (await generateFullInvoicePdf(booking));
+    if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
+      return { skipped: true, reason: "no_pdf" };
+    }
+
     const [customer, car, pickupLocation, dropoffLocation] = await Promise.all([
       User.findById(booking.userId),
       Car.findById(booking.carId),
@@ -178,14 +183,13 @@ export async function sendBookingConfirmationEmail(booking) {
       return { skipped: true, reason: "no_email" };
     }
 
-    const invoicePdfBuffer = await generateFullInvoicePdf(booking);
     const mailOptions = buildBookingConfirmationMailOptions({
       booking,
       customer,
       car,
       pickupLocation,
       dropoffLocation,
-      invoicePdfBuffer,
+      invoicePdfBuffer: pdfBuffer,
     });
 
     const info = await sendMail(mailOptions);

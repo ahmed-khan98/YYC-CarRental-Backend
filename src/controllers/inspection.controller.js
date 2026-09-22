@@ -58,12 +58,10 @@ import {
 import {
   attachInvoiceToBillEntry,
   attachInvoicesForChangedEntries,
-  generateCheckOutInvoicePdf,
   snapshotBillEntryState,
 } from "../utils/billInvoicePdf.js";
-import { sendCheckInAgreementEmail } from "../utils/checkInAgreementEmail.js";
-import { sendCheckOutInvoiceEmail } from "../utils/checkOutInvoiceEmail.js";
-import { runInBackground } from "../utils/backgroundJob.js";
+import { EMAIL_JOB_TYPE } from "../models/emailJob.model.js";
+import { enqueueEmailJob } from "../utils/emailJobs.js";
 
 async function loadAgreementPdfContext(
   bookingId,
@@ -133,7 +131,7 @@ function billEntryId(entry) {
   return String(entry.entryId ?? "");
 }
 
-async function attachInspectionInvoices(bookingId, previousBillEntries, pendingInvoiceEntryIds = []) {
+export async function attachInspectionInvoices(bookingId, previousBillEntries, pendingInvoiceEntryIds = []) {
   if (previousBillEntries == null && pendingInvoiceEntryIds.length === 0) {
     return Booking.findById(bookingId);
   }
@@ -155,7 +153,7 @@ async function attachInspectionInvoices(bookingId, previousBillEntries, pendingI
   return booking;
 }
 
-async function generateAndStoreCheckInAgreement(inspectionId) {
+export async function generateAndStoreCheckInAgreement(inspectionId) {
   const inspection = await VehicleInspection.findById(inspectionId);
   if (!inspection || inspection.type !== "check_in") {
     return { inspection: null, booking: null, pdfBuffer: null };
@@ -198,40 +196,29 @@ async function generateAndStoreCheckInAgreement(inspectionId) {
 }
 
 function queueCheckInDocuments({ bookingId, inspectionId, previousBillEntries, pendingInvoiceEntryIds }) {
-  runInBackground("Check-in agreement documents", async () => {
-    await attachInspectionInvoices(bookingId, previousBillEntries, pendingInvoiceEntryIds);
-
-    const inspection = await VehicleInspection.findById(inspectionId);
-    const booking = await Booking.findById(bookingId);
-    if (!inspection || !booking) return;
-
-    const { pdfBuffer, booking: pdfBooking } = await generateAndStoreCheckInAgreement(inspectionId);
-    if (pdfBuffer) {
-      await sendCheckInAgreementEmail(pdfBooking ?? booking, pdfBuffer);
-    }
+  return enqueueEmailJob({
+    type: EMAIL_JOB_TYPE.CHECKIN_AGREEMENT,
+    bookingId,
+    inspectionId,
+    payload: { previousBillEntries, pendingInvoiceEntryIds },
+  }).catch((err) => {
+    console.error("Failed to enqueue check-in agreement email:", err?.message || err);
   });
 }
 
 function queueCheckOutDocuments({ bookingId, inspectionId, previousBillEntries, pendingInvoiceEntryIds }) {
-  runInBackground("Check-out invoice documents", async () => {
-    await attachInspectionInvoices(bookingId, previousBillEntries, pendingInvoiceEntryIds);
-    const booking = await Booking.findById(bookingId);
-    if (booking) {
-      const checkoutPdfBuffer = await generateCheckOutInvoicePdf(booking);
-      await sendCheckOutInvoiceEmail(booking, checkoutPdfBuffer);
-    }
-
-    const inspection = inspectionId ? await VehicleInspection.findById(inspectionId) : null;
-    if (!inspection || inspection.signedPdfUrl) return;
-    const pdfBuffer = await generateSavedCheckoutAgreementPdf(inspection);
-    const pdfUpload = await uploadPdfToStorage(pdfBuffer, "check-out-documents");
-    inspection.signedPdfUrl = pdfUpload.secure_url;
-    await inspection.save();
+  return enqueueEmailJob({
+    type: EMAIL_JOB_TYPE.CHECKOUT_INVOICE,
+    bookingId,
+    inspectionId,
+    payload: { previousBillEntries, pendingInvoiceEntryIds },
+  }).catch((err) => {
+    console.error("Failed to enqueue check-out invoice email:", err?.message || err);
   });
 }
 
 /** Build the check-out agreement from saved inspection + booking charges, never from a draft. */
-async function generateSavedCheckoutAgreementPdf(checkOutInspection) {
+export async function generateSavedCheckoutAgreementPdf(checkOutInspection) {
   const checkIn = await VehicleInspection.findOne({
     bookingId: checkOutInspection.bookingId,
     type: "check_in",

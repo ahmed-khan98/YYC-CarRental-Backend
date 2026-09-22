@@ -142,6 +142,13 @@ export async function sendBillingChargeEmail({
     const userId = booking.userId?._id ?? booking.userId;
     const customer = await User.findById(userId).select("name email");
 
+    if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
+      console.info("Billing charge email skipped: missing invoice PDF", {
+        bookingId: String(bookingId),
+      });
+      return { skipped: true, reason: "no_pdf" };
+    }
+
     if (!isValidCustomerEmail(customer?.email)) {
       console.info("Billing charge email skipped: invalid or undeliverable customer email", {
         bookingId: String(bookingId),
