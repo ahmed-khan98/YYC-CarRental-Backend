@@ -1,5 +1,10 @@
 import { Booking } from "../models/booking.model.js";
-import { Car } from "../models/car.model.js";
+import {
+  Car,
+  activeCarsMatch,
+  findCarIncludingDeactivated,
+  isCarDeactivated,
+} from "../models/car.model.js";
 import { User } from "../models/user.model.js";
 import { Location } from "../models/location.model.js";
 import { AdditionalService } from "../models/additionalService.model.js";
@@ -10,7 +15,16 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
 import { formatDoc, formatDocs } from "../utils/formatDoc.js";
-import { enrichCar, sanitizeCarForPublic } from "../utils/enrichCar.js";
+import {
+  applyCarSnapshot,
+  bookingCarPopulate,
+  buildCarSnapshot,
+  enrichCar,
+  enrichPopulatedCar,
+  ensureBookingCars,
+  resolveBookingCar,
+  sanitizeCarForPublic,
+} from "../utils/enrichCar.js";
 import { collectUnavailableCarIds } from "../utils/carAvailability.js";
 import { rentalPeriodsConflictEitherWay } from "../utils/datesOverlap.js";
 import { calculateRentalDays, isValidRentalPeriod } from "../utils/rentalPricing.js";
@@ -210,14 +224,14 @@ const LIST_CAR_CORE_FIELDS = "make model year licensePlate";
 const LIST_CAR_IMAGE_FIELDS = "make model year licensePlate category imageUrl imageUrls";
 
 const MY_BOOKING_POPULATE = [
-  { path: "carId", select: LIST_CAR_IMAGE_FIELDS },
+  bookingCarPopulate(LIST_CAR_IMAGE_FIELDS),
   { path: "pickupLocationId", select: LIST_LOCATION_FIELDS },
   { path: "dropoffLocationId", select: LIST_LOCATION_FIELDS },
 ];
 
 const ADMIN_LIST_POPULATE = [
   { path: "userId", select: LIST_CUSTOMER_FIELDS },
-  { path: "carId", select: LIST_CAR_CORE_FIELDS },
+  bookingCarPopulate(LIST_CAR_CORE_FIELDS),
   { path: "pickupLocationId", select: LIST_LOCATION_FIELDS },
   { path: "dropoffLocationId", select: LIST_LOCATION_FIELDS },
 ];
@@ -229,10 +243,8 @@ const CAR_CALENDAR_BOOKING_POPULATE = [
 ];
 
 const OVERVIEW_BOOKING_POPULATE = [
-  { path: "carId", select: LIST_CAR_CORE_FIELDS },
+  bookingCarPopulate(LIST_CAR_CORE_FIELDS),
 ];
-
-const CAR_CALENDAR_FIELDS = "make model year licensePlate color category dailyRate imageUrl imageUrls isAvailable";
 
 function populatedSnapshot(booking, path) {
   return booking.populated(path) ? formatDoc(booking.get(path)) : null;
@@ -240,11 +252,10 @@ function populatedSnapshot(booking, path) {
 
 function formatListBooking(booking) {
   const doc = formatBookingWithIds(booking);
-  const car = booking.populated("carId") ? enrichCar(booking.get("carId")) : null;
   return {
     ...doc,
     user: populatedSnapshot(booking, "userId"),
-    car,
+    car: resolveBookingCar(booking),
     pickupLocation: populatedSnapshot(booking, "pickupLocationId"),
     dropoffLocation: populatedSnapshot(booking, "dropoffLocationId"),
   };
@@ -261,6 +272,7 @@ const getMyBookings = asyncHandler(async (req, res) => {
     result.docs.map((doc) => Booking.hydrate(doc)),
     MY_BOOKING_POPULATE,
   );
+  await ensureBookingCars(bookings);
   const latestByKey = await latestInspectionsByBookingIds(bookings.map((booking) => booking._id));
   const items = bookings.map((booking) => {
     const attached = visibleInspectionsForViewer(
@@ -292,6 +304,7 @@ const getAdminBookings = asyncHandler(async (req, res) => {
     result.docs.map((doc) => Booking.hydrate(doc)),
     ADMIN_LIST_POPULATE,
   );
+  await ensureBookingCars(bookings);
   const items = bookings.map((booking) => {
     const billSummary = computeBillSummary(booking.billEntries);
     return {
@@ -306,7 +319,7 @@ const getAdminBookings = asyncHandler(async (req, res) => {
 });
 
 const getAdminBookingsByCar = asyncHandler(async (req, res) => {
-  const car = await Car.findById(req.params.carId).select(CAR_CALENDAR_FIELDS);
+  const car = await findCarIncludingDeactivated(req.params.carId);
   if (!car) {
     throw new ApiError(404, "Car not found");
   }
@@ -340,8 +353,8 @@ const getAdminOverview = asyncHandler(async (req, res) => {
     revenueAgg,
     recentBookings,
   ] = await Promise.all([
-    Car.countDocuments(),
-    Car.countDocuments({ isAvailable: true }),
+    Car.countDocuments(activeCarsMatch()),
+    Car.countDocuments({ isAvailable: true, ...activeCarsMatch() }),
     Booking.countDocuments(),
     Booking.countDocuments({ status: "pending" }),
     Booking.countDocuments({ status: "checked_in" }),
@@ -357,6 +370,7 @@ const getAdminOverview = asyncHandler(async (req, res) => {
       .select("pickupDate totalAmount status carId")
       .populate(OVERVIEW_BOOKING_POPULATE),
   ]);
+  await ensureBookingCars(recentBookings);
 
   return res.status(200).json(new ApiResponse(200, {
     stats: {
@@ -370,7 +384,7 @@ const getAdminOverview = asyncHandler(async (req, res) => {
       locations,
     },
     recentBookings: recentBookings.map((booking) => {
-      const car = booking.populated("carId") ? formatDoc(booking.get("carId")) : null;
+      const car = resolveBookingCar(booking);
       return {
         _id: booking._id.toString(),
         pickupDate: booking.pickupDate,
@@ -421,7 +435,7 @@ const getBookingDetail = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Forbidden");
   }
 
-  const car = await Car.findById(booking.carId);
+  const car = await findCarIncludingDeactivated(booking.carId);
 
   const days = calculateRentalDays(
     booking.pickupDate,
@@ -470,7 +484,7 @@ const getBookingDetail = asyncHandler(async (req, res) => {
   const visibleInspections = visibleInspectionsForViewer(booking, attached, isAdmin);
   const [, createdBy, updatedBy, checkInPerformedBy, checkOutPerformedBy] = await Promise.all([
     booking.populate([
-      { path: "carId", select: DETAIL_CAR_FIELDS },
+      bookingCarPopulate(DETAIL_CAR_FIELDS),
       { path: "pickupLocationId", select: LOCATION_DETAIL_FIELDS },
       { path: "dropoffLocationId", select: LOCATION_DETAIL_FIELDS },
       { path: "userId", select: CUSTOMER_DETAIL_FIELDS },
@@ -497,7 +511,8 @@ const getBookingDetail = asyncHandler(async (req, res) => {
     ),
   ]);
 
-  const detailCar = booking.populated("carId") ? enrichCar(booking.get("carId")) : null;
+  await ensureBookingCars(booking);
+  const detailCar = resolveBookingCar(booking) ?? enrichCar(car);
 
   return res.status(200).json(new ApiResponse(200, {
       booking: {
@@ -560,8 +575,9 @@ const createBooking = asyncHandler(async (req, res) => {
     serviceQuantities,
   } = req.body;
 
-  const car = await Car.findById(carId);
+  const car = await findCarIncludingDeactivated(carId);
   if (!car) throw new ApiError(404, "Car not found");
+  if (isCarDeactivated(car)) throw new ApiError(400, "Car is not available");
 
   const storedQuantities = await resolveStoredServiceQuantities(
     additionalServiceIds ?? [],
@@ -628,6 +644,7 @@ const createBooking = asyncHandler(async (req, res) => {
     bookedDailyMileageLimit: pricingSnapshot.bookedDailyMileageLimit,
     bookedChargePerExtraKm: pricingSnapshot.bookedChargePerExtraKm,
     serviceSnapshots: pricingSnapshot.serviceSnapshots,
+    carSnapshot: buildCarSnapshot(car) ?? undefined,
     additionalServiceIds,
     serviceQuantities: storedQuantities,
     extraDriverCount: hasExtraDriver ? driverCount : undefined,
@@ -665,8 +682,9 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
     notes,
   } = req.body;
 
-  const car = await Car.findById(carId);
+  const car = await findCarIncludingDeactivated(carId);
   if (!car) throw new ApiError(404, "Car not found");
+  if (isCarDeactivated(car)) throw new ApiError(400, "Car is not available");
 
   const storedQuantities = await resolveStoredServiceQuantities(
     additionalServiceIds ?? [],
@@ -732,6 +750,7 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
     bookedDailyMileageLimit: pricingSnapshot.bookedDailyMileageLimit,
     bookedChargePerExtraKm: pricingSnapshot.bookedChargePerExtraKm,
     serviceSnapshots: pricingSnapshot.serviceSnapshots,
+    carSnapshot: buildCarSnapshot(car) ?? undefined,
     additionalServiceIds,
     serviceQuantities: storedQuantities,
     extraDriverCount: hasExtraDriver ? driverCount : undefined,
@@ -773,8 +792,12 @@ const adminUpdateBooking = asyncHandler(async (req, res) => {
   } = req.body;
 
   const nextCarId = carId ?? booking.carId.toString();
-  const car = await Car.findById(nextCarId);
+  const car = await findCarIncludingDeactivated(nextCarId);
   if (!car) throw new ApiError(404, "Car not found");
+  const assigningDifferentCar = Boolean(carId && carId !== booking.carId.toString());
+  if (assigningDifferentCar && isCarDeactivated(car)) {
+    throw new ApiError(400, "Car is not available");
+  }
 
   const nextPickupDate = pickupDate ?? booking.pickupDate;
   const nextPickupTime = pickupTime ?? booking.pickupTime ?? "10:00";
@@ -874,6 +897,7 @@ const adminUpdateBooking = asyncHandler(async (req, res) => {
   booking.bookedDailyMileageLimit = bookedDailyMileageLimit;
   booking.bookedChargePerExtraKm = bookedChargePerExtraKm;
   booking.serviceSnapshots = serviceSnapshots;
+  applyCarSnapshot(booking, car);
   if (notes !== undefined) booking.notes = patchText(notes);
 
   if (status) {
@@ -957,7 +981,7 @@ const getCancellationPreview = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Booking is already cancelled");
   }
 
-  const car = await Car.findById(booking.carId);
+  const car = await findCarIncludingDeactivated(booking.carId);
   return res.status(200).json(new ApiResponse(200, buildCancellationPreview(booking, car), "Cancellation preview fetched"));
 });
 
@@ -993,7 +1017,7 @@ const cancelBooking = asyncHandler(async (req, res) => {
   }
 
   let cancellationSummary;
-  const car = await Car.findById(booking.carId);
+  const car = await findCarIncludingDeactivated(booking.carId);
 
   const shouldApplyCancellationBilling =
     booking.status !== "checked_in" &&

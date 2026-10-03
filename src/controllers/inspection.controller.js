@@ -1,6 +1,6 @@
 import { VehicleInspection } from "../models/vehicleInspection.model.js";
 import { Booking } from "../models/booking.model.js";
-import { Car } from "../models/car.model.js";
+import { Car, findCarIncludingDeactivated } from "../models/car.model.js";
 import { User } from "../models/user.model.js";
 import { Location } from "../models/location.model.js";
 import { isStaff } from "../middlewares/auth.middleware.js";
@@ -9,7 +9,12 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
 import { formatDoc } from "../utils/formatDoc.js";
-import { enrichCar } from "../utils/enrichCar.js";
+import {
+  bookingCarPopulate,
+  enrichPopulatedCar,
+  ensureBookingCars,
+  resolveBookingCar,
+} from "../utils/enrichCar.js";
 import { formatInspections } from "../utils/formatInspection.js";
 import {
   uploadToStorage,
@@ -76,7 +81,7 @@ async function loadAgreementPdfContext(
   }
 
   const [car, customer, pickupLocation, dropoffLocation] = await Promise.all([
-    Car.findById(booking.carId),
+    findCarIncludingDeactivated(booking.carId),
     User.findById(booking.userId),
     Location.findById(booking.pickupLocationId),
     Location.findById(booking.dropoffLocationId),
@@ -497,7 +502,7 @@ const createInspection = asyncHandler(async (req, res) => {
     const booking = await Booking.findById(bookingId);
     if (!booking) throw new ApiError(404, "Booking not found");
 
-    const car = await Car.findById(carId);
+    const car = await findCarIncludingDeactivated(carId);
     if (!car) throw new ApiError(404, "Car not found");
 
     const checkIn = await VehicleInspection.findOne({ bookingId, type: "check_in" });
@@ -714,7 +719,7 @@ function formatCheckInOutBooking(booking, checkIn, checkOut) {
     pickupLocationId: refId(booking.pickupLocationId),
     dropoffLocationId: refId(booking.dropoffLocationId),
     user: populatedDoc(booking, "userId"),
-    car: booking.populated("carId") ? enrichCar(booking.get("carId")) : null,
+    car: resolveBookingCar(booking),
     pickupLocation: populatedDoc(booking, "pickupLocationId"),
     dropoffLocation: populatedDoc(booking, "dropoffLocationId"),
     checkIn: checkIn ?? null,
@@ -726,7 +731,7 @@ function formatCheckInOutBooking(booking, checkIn, checkOut) {
 
 const CHECKINOUT_BOOKING_POPULATE = [
   { path: "userId", select: CHECKINOUT_USER_FIELDS },
-  { path: "carId", select: CHECKINOUT_CAR_FIELDS },
+  bookingCarPopulate(CHECKINOUT_CAR_FIELDS),
   { path: "pickupLocationId", select: CHECKINOUT_LOCATION_FIELDS },
   { path: "dropoffLocationId", select: CHECKINOUT_LOCATION_FIELDS },
 ];
@@ -746,6 +751,7 @@ const listCheckInOutBoard = asyncHandler(async (req, res) => {
       .populate(CHECKINOUT_BOOKING_POPULATE),
   ]);
   const bookings = [...activeBookings, ...completedBookings];
+  await ensureBookingCars(bookings);
   const bookingIds = bookings.map((booking) => booking._id);
 
   const inspections = await VehicleInspection.find({ bookingId: { $in: bookingIds } })
@@ -778,7 +784,7 @@ const listCheckInOutBoard = asyncHandler(async (req, res) => {
 
 const getInspectionById = asyncHandler(async (req, res) => {
   const inspection = await VehicleInspection.findById(req.params.id)
-    .populate({ path: "carId", select: CHECKINOUT_CAR_FIELDS })
+    .populate(bookingCarPopulate(CHECKINOUT_CAR_FIELDS))
     .populate({
       path: "bookingId",
       select: INSPECTION_BOOKING_FIELDS,
@@ -792,6 +798,8 @@ const getInspectionById = asyncHandler(async (req, res) => {
   }
 
   const booking = inspection.populated("bookingId") ? inspection.get("bookingId") : null;
+  await ensureBookingCars(inspection);
+  if (booking) await ensureBookingCars(booking);
   const staff = isStaff(req.user);
   const bookingUserId = booking ? refId(booking.userId) : null;
   if (!staff && bookingUserId !== req.user._id.toString()) {
@@ -807,7 +815,7 @@ const getInspectionById = asyncHandler(async (req, res) => {
         bookingId: refId(inspection.bookingId),
         carId: refId(inspection.carId),
         conductedBy: refId(inspection.conductedBy),
-        car: inspection.populated("carId") ? enrichCar(inspection.get("carId")) : null,
+        car: enrichPopulatedCar(inspection, "carId"),
         user: booking ? populatedDoc(booking, "userId") : null,
         pickupLocation: booking ? populatedDoc(booking, "pickupLocationId") : null,
         dropoffLocation: booking ? populatedDoc(booking, "dropoffLocationId") : null,

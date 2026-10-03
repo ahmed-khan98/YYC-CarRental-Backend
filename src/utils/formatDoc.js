@@ -1,10 +1,22 @@
-export function formatDoc(doc) {
-  if (!doc) return null;
-  const obj = doc.toObject
-    ? doc.toObject({ flattenObjectIds: true, versionKey: false })
-    : { ...doc };
+function isObjectIdLike(value) {
+  return Boolean(value && typeof value === "object" && value._bsontype === "ObjectId");
+}
 
-  const id = obj._id?.toString?.() ?? String(obj._id ?? "");
+export function formatDoc(doc) {
+  if (doc == null || typeof doc !== "object" || isObjectIdLike(doc)) return null;
+
+  let obj;
+  try {
+    obj = typeof doc.toObject === "function"
+      ? doc.toObject({ flattenObjectIds: true, versionKey: false })
+      : { ...doc };
+  } catch {
+    return null;
+  }
+  if (obj == null || typeof obj !== "object") return null;
+
+  const rawId = obj._id;
+  const id = rawId == null ? "" : (rawId.toString?.() ?? String(rawId));
   const createdAt = obj.createdAt ?? obj._creationTime;
   const updatedAt = obj.updatedAt ?? obj._updatedTime;
   const { __v, password, refreshToken, ...rest } = obj;

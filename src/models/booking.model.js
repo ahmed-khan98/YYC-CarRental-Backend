@@ -20,6 +20,14 @@ const bookingSchema = new mongoose.Schema(
     bookedDailyRate: { type: Number },
     bookedDailyMileageLimit: { type: Number },
     bookedChargePerExtraKm: { type: Number },
+    carSnapshot: {
+      make: { type: String },
+      model: { type: String },
+      year: { type: Number },
+      category: { type: String },
+      licensePlate: { type: String },
+      color: { type: String },
+    },
     serviceSnapshots: [
       {
         serviceId: { type: mongoose.Schema.Types.ObjectId, ref: "AdditionalService" },
@@ -109,7 +117,7 @@ const bookingSchema = new mongoose.Schema(
     },
     cancellationReason: { type: String },
     cancelledBy: { type: String, enum: ["user", "admin"] },
-    cancellationPolicy: { type: String, enum: ["one_day_fee", "non_refundable"] },
+    cancellationPolicy: { type: String, enum: ["one_day_fee", "non_refundable", "past_pickup"] },
     cancellationRefundAmount: { type: Number },
     createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     createdByName: { type: String },
