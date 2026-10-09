@@ -37,8 +37,21 @@ export function enrichCar(car) {
   const doc = formatDoc(car);
   if (!doc) return null;
   if (!isPopulatedCar(doc) && !doc._id) return null;
-  const imageUrls = (doc.imageUrls?.length ? doc.imageUrls : doc.imageUrl ? [doc.imageUrl] : [])
-    .map((url) => resolvePublicMediaUrl(url))
+  const rawUrls = Array.isArray(doc.imageUrls)
+    ? doc.imageUrls
+    : typeof doc.imageUrls === "string" && doc.imageUrls
+      ? [doc.imageUrls]
+      : doc.imageUrl
+        ? [doc.imageUrl]
+        : [];
+  const imageUrls = rawUrls
+    .map((url) => {
+      try {
+        return resolvePublicMediaUrl(url);
+      } catch {
+        return null;
+      }
+    })
     .filter(Boolean);
 
   delete doc.imageUrl;
@@ -144,7 +157,7 @@ export async function ensureBookingCars(bookings, path = "carId") {
 }
 
 export function sanitizeCarForPublic(car) {
-  if (!car) return car;
+  if (!car || typeof car !== "object") return car;
   const { licensePlate: _licensePlate, vin: _vin, ...publicCar } = car;
   return publicCar;
 }

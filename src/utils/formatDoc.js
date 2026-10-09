@@ -16,16 +16,38 @@ export function formatDoc(doc) {
   if (obj == null || typeof obj !== "object") return null;
 
   const rawId = obj._id;
-  const id = rawId == null ? "" : (rawId.toString?.() ?? String(rawId));
+  let id = "";
+  try {
+    if (rawId != null) {
+      id = typeof rawId.toString === "function" ? rawId.toString() : String(rawId);
+    }
+  } catch {
+    id = "";
+  }
   const createdAt = obj.createdAt ?? obj._creationTime;
   const updatedAt = obj.updatedAt ?? obj._updatedTime;
   const { __v, password, refreshToken, ...rest } = obj;
 
+  let creationTime = Date.now();
+  let updatedTime;
+  try {
+    if (createdAt) {
+      const ms = new Date(createdAt).getTime();
+      if (Number.isFinite(ms)) creationTime = ms;
+    }
+    if (updatedAt) {
+      const ms = new Date(updatedAt).getTime();
+      if (Number.isFinite(ms)) updatedTime = ms;
+    }
+  } catch {
+    // keep defaults — list endpoints must not 500 on bad dates
+  }
+
   return {
     ...rest,
     _id: id,
-    _creationTime: createdAt ? new Date(createdAt).getTime() : Date.now(),
-    _updatedTime: updatedAt ? new Date(updatedAt).getTime() : undefined,
+    _creationTime: creationTime,
+    _updatedTime: updatedTime,
   };
 }
 

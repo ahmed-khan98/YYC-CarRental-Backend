@@ -16,16 +16,22 @@ import { normalizeUpdateBody } from "../utils/patchPayload.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
 
 function formatCarForRequest(req, car) {
-  const enriched = enrichCar(car);
-  return isStaff(req.user) ? enriched : sanitizeCarForPublic(enriched);
+  try {
+    const enriched = enrichCar(car);
+    if (!enriched) return null;
+    return isStaff(req.user) ? enriched : sanitizeCarForPublic(enriched);
+  } catch {
+    return null;
+  }
 }
 
 const listCars = asyncHandler(async (req, res) => {
-  const { category, locationId, availableOnly, includeDeactivated, includeInactive } = req.query;
+  const query = req.query && typeof req.query === "object" ? req.query : {};
+  const { category, locationId, availableOnly, includeDeactivated, includeInactive } = query;
   const match = {};
   if (availableOnly === "true") match.isAvailable = true;
-  if (category) match.category = category;
-  if (locationId && mongoose.Types.ObjectId.isValid(locationId)) {
+  if (typeof category === "string" && category) match.category = category;
+  if (typeof locationId === "string" && mongoose.Types.ObjectId.isValid(locationId)) {
     match.locationId = new mongoose.Types.ObjectId(locationId);
   }
   const staffWantsDeactivated =
@@ -40,7 +46,8 @@ const listCars = asyncHandler(async (req, res) => {
     req,
     { defaultLimit: wantsPagination(req) ? 50 : 200 },
   );
-  const cars = result.docs.map((car) => formatCarForRequest(req, car));
+  const docs = Array.isArray(result?.docs) ? result.docs : [];
+  const cars = docs.map((car) => formatCarForRequest(req, car)).filter(Boolean);
   if (wantsPagination(req)) {
     return res.status(200).json(new ApiResponse(200, paginatedPayload(cars, result), "Cars fetched"));
   }
@@ -73,7 +80,7 @@ const listAvailableCars = asyncHandler(async (req, res) => {
   return res.status(200).json(
     new ApiResponse(
       200,
-      cars.map((car) => formatCarForRequest(req, car)),
+      cars.map((car) => formatCarForRequest(req, car)).filter(Boolean),
       "Available cars fetched",
     ),
   );
@@ -88,6 +95,9 @@ const getCarById = asyncHandler(async (req, res) => {
 });
 
 const createCar = asyncHandler(async (req, res) => {
+  
+  const validated = validateCarFields(req.body, { requireAll: true });
+
   const car = await Car.create({
     ...normalizeCarImageFields(req.body),
     isAvailable: true,

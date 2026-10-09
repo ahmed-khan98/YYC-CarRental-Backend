@@ -85,6 +85,6 @@ app.use((_req, _res, next) => {
   next(new ApiError(404, "Route not found"));
 });
 
-app.use(ErrorHandler);
+// app.use(ErrorHandler);
 
 export { app };
