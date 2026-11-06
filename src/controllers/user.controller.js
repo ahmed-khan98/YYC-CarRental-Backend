@@ -5,6 +5,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { formatDoc, formatDocs } from "../utils/formatDoc.js";
 import { patchText } from "../utils/patchPayload.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
+import { assertValidEmail } from "../utils/email.js";
 
 const getCurrentUser = asyncHandler(async (req, res) => {
   return res.status(200).json(new ApiResponse(200, formatDoc(req.user), "Current user fetched"));
@@ -43,7 +44,12 @@ const listUsers = asyncHandler(async (req, res) => {
 });
 
 const listSubAdmins = asyncHandler(async (req, res) => {
-  const subAdmins = await User.find({ role: "sub_admin" }).sort({ createdAt: -1 });
+  // Temporary: getAll returns only active records (missing isActive treated as active)
+  // const subAdmins = await User.find({ role: "sub_admin" })
+  const subAdmins = await User.find({ role: "sub_admin", isActive: { $ne: false } })
+    .select("-password -refreshToken")
+    .sort({ createdAt: -1 })
+    .lean();
   return res.status(200).json(new ApiResponse(200, formatDocs(subAdmins), "Sub-admins fetched"));
 });
 
@@ -56,6 +62,7 @@ const createSubAdmin = asyncHandler(async (req, res) => {
   if (password.length < 6) {
     throw new ApiError(400, "Password must be at least 6 characters");
   }
+  assertValidEmail(email);
 
   const normalizedEmail = email.toLowerCase().trim();
   const existing = await User.findOne({ email: normalizedEmail });
@@ -78,12 +85,13 @@ const createSubAdmin = asyncHandler(async (req, res) => {
 const createCustomer = asyncHandler(async (req, res) => {
   const { name, email, password, phone } = req.body;
 
-  if (!name?.trim() || !email?.trim() || !password) {
-    throw new ApiError(400, "Name, email, and password are required");
+  if (!name?.trim() || !email?.trim() || !phone?.trim() || !password) {
+    throw new ApiError(400, "Name, email, phone, and password are required");
   }
   if (password.length < 6) {
     throw new ApiError(400, "Password must be at least 6 characters");
   }
+  assertValidEmail(email);
 
   const normalizedEmail = email.toLowerCase().trim();
   const existing = await User.findOne({ email: normalizedEmail });
@@ -95,7 +103,7 @@ const createCustomer = asyncHandler(async (req, res) => {
     name: name.trim(),
     email: normalizedEmail,
     password,
-    phone: phone?.trim() || undefined,
+    phone: phone.trim(),
     role: "customer",
     createdBy: req.user._id,
   });
@@ -121,6 +129,7 @@ const updateSubAdmin = asyncHandler(async (req, res) => {
   if (email !== undefined) {
     const normalizedEmail = email.toLowerCase().trim();
     if (!normalizedEmail) throw new ApiError(400, "Email is required");
+    assertValidEmail(normalizedEmail);
     const existing = await User.findOne({ email: normalizedEmail, _id: { $ne: user._id } });
     if (existing) {
       throw new ApiError(400, "Email already registered");
@@ -144,6 +153,21 @@ const updateSubAdmin = asyncHandler(async (req, res) => {
   return res.status(200).json(new ApiResponse(200, formatDoc(user), "Sub-admin updated"));
 });
 
+const deactivateSubAdmin = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+  if (user.role !== "sub_admin") {
+    throw new ApiError(400, "Only sub-admin accounts can be removed from this page");
+  }
+
+  user.isActive = false;
+  user.refreshToken = undefined;
+  await user.save();
+  return res.status(200).json(new ApiResponse(200, formatDoc(user), "Sub-admin deactivated"));
+});
+
 const deleteSubAdmin = asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id);
   if (!user) {
@@ -153,7 +177,12 @@ const deleteSubAdmin = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Only sub-admin accounts can be removed from this page");
   }
 
-  await User.findByIdAndDelete(req.params.id);
+  // Temporary: hard delete commented out — soft deactivate instead
+  // await User.findByIdAndDelete(req.params.id);
+  // return res.status(200).json(new ApiResponse(200, { success: true }, "Sub-admin deleted"));
+  user.isActive = false;
+  user.refreshToken = undefined;
+  await user.save();
   return res.status(200).json(new ApiResponse(200, { success: true }, "Sub-admin deleted"));
 });
 
@@ -184,6 +213,7 @@ export {
   createSubAdmin,
   createCustomer,
   updateSubAdmin,
+  deactivateSubAdmin,
   deleteSubAdmin,
   setUserRole,
 };

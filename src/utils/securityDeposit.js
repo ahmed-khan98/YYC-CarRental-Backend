@@ -1,8 +1,9 @@
 import { ApiError } from "./ApiError.js";
+import { DEFAULT_PRE_AUTHORIZED_AMOUNT } from "./appConfig.js";
 import { resolveBillEntryTotalAmount } from "./billing.js";
 import { isCheckInPaymentEntry, resolveCheckoutAt } from "./billPhase.js";
 
-export const SECURITY_DEPOSIT_AMOUNT = 800;
+export const SECURITY_DEPOSIT_AMOUNT = DEFAULT_PRE_AUTHORIZED_AMOUNT;
 export const SECURITY_DEPOSIT_HOLD_DAYS = 15;
 
 function money(value) {
@@ -53,16 +54,20 @@ export function sumDepositDeductions(entries = [], excludeEntryId) {
   );
 }
 
+export function resolveBookingPreAuthorizedAmount(booking) {
+  const amount = money(booking?.securityDepositAmount);
+  return amount > 0 ? amount : DEFAULT_PRE_AUTHORIZED_AMOUNT;
+}
+
 export function computeDepositTotals(booking, excludeEntryId) {
-  const collected = isDepositCollected(booking);
-  const amount = money(booking?.securityDepositAmount) || (collected ? SECURITY_DEPOSIT_AMOUNT : SECURITY_DEPOSIT_AMOUNT);
+  const amount = resolveBookingPreAuthorizedAmount(booking);
   const deductedAmount = sumDepositDeductions(booking?.billEntries, excludeEntryId);
   const remainingAmount = Math.max(0, money(amount - deductedAmount));
   return { amount, deductedAmount, remainingAmount };
 }
 
 export function applySecurityDepositOnCheckIn(booking, heldAt = new Date()) {
-  booking.securityDepositAmount = SECURITY_DEPOSIT_AMOUNT;
+  booking.securityDepositAmount = resolveBookingPreAuthorizedAmount(booking);
   booking.securityDepositHeldAt = booking.securityDepositHeldAt ?? heldAt;
   if (booking.securityDepositStatus !== "refunded") {
     persistSecurityDepositStatus(booking);
@@ -74,7 +79,7 @@ export function persistSecurityDepositStatus(booking) {
   if (booking.securityDepositStatus === "refunded") return booking;
   if (!isDepositCollected(booking)) return booking;
 
-  booking.securityDepositAmount = SECURITY_DEPOSIT_AMOUNT;
+  booking.securityDepositAmount = resolveBookingPreAuthorizedAmount(booking);
   const { deductedAmount } = computeDepositTotals(booking);
   booking.securityDepositStatus = deductedAmount > 0 ? "partially_used" : "held";
   return booking;

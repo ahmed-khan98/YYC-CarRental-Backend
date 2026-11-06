@@ -11,4 +11,6 @@ const locationSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+locationSchema.index({ isActive: 1 });
+
 export const Location = mongoose.model("Location", locationSchema);

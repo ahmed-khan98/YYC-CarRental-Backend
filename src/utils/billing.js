@@ -48,6 +48,14 @@ export function resolveBillEntryTotalAmount(entry) {
   return getBillEntryTotals(entry.amount).totalAmount;
 }
 
+/** Paid deposit/e-transfer charges settle the bill without a payment line. Checkout charges marked paid because a check-out payment already covered them must not be credited again. */
+export function isStandalonePaidCharge(entry) {
+  if (!entry || entry.entryType !== "charge") return false;
+  if (entry.source !== "manual") return false;
+  if (resolveEntryStatus(entry) !== "paid") return false;
+  return entry.paidVia === "deposit" || entry.paidVia === "e_transfer";
+}
+
 /**
  * @param {Array<Record<string, unknown>>} entries
  */

@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { logger } from "../utils/logger.js";
 
 const connectDB = async () => {
   try {
@@ -9,11 +10,9 @@ const connectDB = async () => {
 
     mongoose.set("strictQuery", true);
     const connectionInstance = await mongoose.connect(uri);
-    console.log(
-      `\n MongoDB connected !! DB HOST: ${connectionInstance.connection.host}`,
-    );
+    logger.info(`MongoDB connected !! DB HOST: ${connectionInstance.connection.host}`);
   } catch (error) {
-    console.log("MONGODB connection FAILED ", error);
+    logger.error("MONGODB connection FAILED ", error);
     process.exit(1);
   }
 };

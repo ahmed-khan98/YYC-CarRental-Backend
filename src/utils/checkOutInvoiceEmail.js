@@ -1,4 +1,5 @@
 import { User } from "../models/user.model.js";
+import { logger } from "./logger.js";
 import { Car } from "../models/car.model.js";
 import { computeBillSummary } from "./billing.js";
 import { getBookingPublicNumber } from "./billInvoicePdf.js";
@@ -140,7 +141,7 @@ export async function sendCheckOutInvoiceEmail(booking, pdfBuffer) {
   const bookingId = booking?._id;
   try {
     if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
-      console.info("Check-out invoice email skipped: missing PDF", {
+      logger.info("Check-out invoice email skipped: missing PDF", {
         bookingId: String(bookingId),
       });
       return { skipped: true, reason: "no_pdf" };
@@ -152,7 +153,7 @@ export async function sendCheckOutInvoiceEmail(booking, pdfBuffer) {
     ]);
 
     if (!isValidCustomerEmail(customer?.email)) {
-      console.info("Check-out invoice email skipped: invalid or undeliverable customer email", {
+      logger.info("Check-out invoice email skipped: invalid or undeliverable customer email", {
         bookingId: String(bookingId),
         email: customer?.email || null,
       });
@@ -167,7 +168,7 @@ export async function sendCheckOutInvoiceEmail(booking, pdfBuffer) {
     });
 
     const info = await sendMail(mailOptions);
-    console.info("Check-out invoice email sent:", {
+    logger.info("Check-out invoice email sent:", {
       bookingId: String(bookingId),
       to: mailOptions.to,
       from: mailOptions.from?.address,

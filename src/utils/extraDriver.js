@@ -1,4 +1,7 @@
 import { isStoredImageUrl } from "./localFileStore.js";
+import { loadServicesByIds } from "./loadServices.js";
+import { LICENSE_EXPIRY_ERROR, isLicenseExpiryAfterReturnDate } from "./licenseExpiry.js";
+import { LICENSE_NUMBER_ERROR, isValidLicenseNumber } from "./licenseNumber.js";
 
 /** Matches the additional-driver add-on by category or service name. */
 export function isExtraDriverService(service) {
@@ -11,10 +14,11 @@ export function isExtraDriverService(service) {
   );
 }
 
-export async function findExtraDriverService(AdditionalService, additionalServiceIds = []) {
+export async function findExtraDriverService(ServiceModel, additionalServiceIds = []) {
   if (!additionalServiceIds.length) return null;
+  const { byId } = await loadServicesByIds(additionalServiceIds, ServiceModel);
   for (const svcId of additionalServiceIds) {
-    const svc = await AdditionalService.findById(svcId);
+    const svc = byId.get(String(svcId));
     if (isExtraDriverService(svc)) return svc;
   }
   return null;
@@ -53,7 +57,7 @@ export function resolveBookingExtraDriverCount(booking) {
   return names.filter((name) => name?.trim()).length;
 }
 
-export function validateExtraDriverCheckInDetails(expectedCount, extraDrivers) {
+export function validateExtraDriverCheckInDetails(expectedCount, extraDrivers, returnDate) {
   const count = Number(expectedCount) || 0;
   if (count < 1) return null;
 
@@ -67,11 +71,14 @@ export function validateExtraDriverCheckInDetails(expectedCount, extraDrivers) {
     if (!driver.fullName?.trim()) {
       return `Driver ${i + 1}: full name is required`;
     }
-    if (!driver.licenseNumber?.trim()) {
-      return `Driver ${i + 1}: license number is required`;
+    if (!isValidLicenseNumber(driver.licenseNumber)) {
+      return LICENSE_NUMBER_ERROR;
     }
     if (!driver.licenseExpiryDate?.trim()) {
       return `Driver ${i + 1}: license expiry date is required`;
+    }
+    if (!isLicenseExpiryAfterReturnDate(driver.licenseExpiryDate, returnDate)) {
+      return LICENSE_EXPIRY_ERROR;
     }
     if (!driver.countryOfIssue?.trim()) {
       return `Driver ${i + 1}: country of issue is required`;

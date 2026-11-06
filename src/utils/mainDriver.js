@@ -1,7 +1,10 @@
 import { isStoredImageUrl } from "./localFileStore.js";
+import { EMAIL_ERROR, isValidEmail } from "./email.js";
+import { LICENSE_EXPIRY_ERROR, isLicenseExpiryAfterReturnDate } from "./licenseExpiry.js";
+import { LICENSE_NUMBER_ERROR, isValidLicenseNumber } from "./licenseNumber.js";
+import { DRIVER_AGE_ERROR, isDriverAtLeast18 } from "./driverAge.js";
 
-
-export function validateMainDriverCheckInDetails(mainDriver) {
+export function validateMainDriverCheckInDetails(mainDriver, returnDate) {
   if (!mainDriver || typeof mainDriver !== "object") {
     return "Main driver details are required";
   }
@@ -12,7 +15,6 @@ export function validateMainDriverCheckInDetails(mainDriver) {
     ["phoneNumber", "phone number"],
     ["emailAddress", "email address"],
     ["homeAddressLine1", "home address (line 1)"],
-    ["licenseNumber", "driver's license number"],
     ["issuingProvince", "issuing province"],
     ["licenseExpiryDate", "license expiry date"],
   ];
@@ -23,13 +25,25 @@ export function validateMainDriverCheckInDetails(mainDriver) {
     }
   }
 
+  if (!isDriverAtLeast18(mainDriver.dateOfBirth)) {
+    return DRIVER_AGE_ERROR;
+  }
+
   const email = mainDriver.emailAddress.trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-    return "Main driver: enter a valid email address";
+  if (!isValidEmail(email)) {
+    return EMAIL_ERROR;
+  }
+
+  if (!isValidLicenseNumber(mainDriver.licenseNumber)) {
+    return LICENSE_NUMBER_ERROR;
   }
 
   if (!isStoredImageUrl(mainDriver.licenseImageUrl)) {
     return "Main driver: license image is required";
+  }
+
+  if (!isLicenseExpiryAfterReturnDate(mainDriver.licenseExpiryDate, returnDate)) {
+    return LICENSE_EXPIRY_ERROR;
   }
 
   return null;

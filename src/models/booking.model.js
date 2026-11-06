@@ -161,5 +161,11 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+bookingSchema.index({ userId: 1, createdAt: -1 });
+bookingSchema.index({ carId: 1, status: 1 });
+bookingSchema.index({ status: 1, createdAt: -1 });
+bookingSchema.index({ pickupDate: 1, returnDate: 1 });
+bookingSchema.index({ carId: 1, pickupDate: 1, returnDate: 1 });
+
 bookingSchema.plugin(mongooseAggregatePaginate);
 export const Booking = mongoose.model("Booking", bookingSchema);

@@ -1,4 +1,5 @@
 import { User } from "../models/user.model.js";
+import { logger } from "./logger.js";
 import { Car } from "../models/car.model.js";
 import { Location } from "../models/location.model.js";
 import {
@@ -176,7 +177,7 @@ export async function sendBookingConfirmationEmail(booking, invoicePdfBuffer) {
     ]);
 
     if (!isValidCustomerEmail(customer?.email)) {
-      console.info("Booking confirmation email skipped: invalid or undeliverable customer email", {
+      logger.info("Booking confirmation email skipped: invalid or undeliverable customer email", {
         bookingId: String(bookingId),
         email: customer?.email || null,
       });
@@ -193,7 +194,7 @@ export async function sendBookingConfirmationEmail(booking, invoicePdfBuffer) {
     });
 
     const info = await sendMail(mailOptions);
-    console.info("Booking confirmation email sent:", {
+    logger.info("Booking confirmation email sent:", {
       bookingId: String(bookingId),
       to: mailOptions.to,
       from: mailOptions.from?.address,

@@ -28,5 +28,8 @@ userSchema.methods.comparePassword = function comparePassword(candidate) {
   return bcrypt.compare(candidate, this.password);
 };
 
+userSchema.index({ role: 1, createdAt: -1 });
+userSchema.index({ isActive: 1 });
+
 userSchema.plugin(mongooseAggregatePaginate);
 export const User = mongoose.model("User", userSchema);

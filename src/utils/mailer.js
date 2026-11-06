@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import nodemailer from "nodemailer";
+import { logger } from "./logger.js";
 
 // SMTP / contact-form env (set in server/.env):
 // SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM
@@ -224,10 +225,10 @@ export function logCustomerEmailFailure(label, extra, err) {
     message: err?.message,
   };
   if (isUndeliverableEmailError(err)) {
-    console.warn(`${label} skipped: invalid or rejected recipient`, payload);
+    logger.warn(`${label} skipped: invalid or rejected recipient`, payload);
     return { skipped: true, reason: "undeliverable" };
   }
-  console.error(`${label} failed:`, payload);
+  logger.error(`${label} failed:`, payload);
   return { skipped: true, reason: "send_failed" };
 }
 
@@ -314,7 +315,7 @@ function smtpFallbackTargets() {
 function createTransporter(options) {
   const transporter = nodemailer.createTransport(options);
   transporter.on("error", (err) => {
-    console.error("SMTP connection error:", err?.message || err);
+    logger.error("SMTP connection error:", err?.message || err);
   });
   return transporter;
 }
@@ -355,13 +356,13 @@ async function sendWithSmtpFallback(mailOptions) {
       const info = await getTransporter(options).sendMail(mailOptions);
       if (!preferredSmtpTarget || smtpTargetKey(preferredSmtpTarget) !== smtpTargetKey(target)) {
         preferredSmtpTarget = target;
-        console.info("SMTP connected:", smtpTargetKey(target));
+        logger.info("SMTP connected:", smtpTargetKey(target));
       }
       return info;
     } catch (err) {
       lastError = err;
       if (!isSmtpUnreachableError(err)) throw err;
-      console.warn("SMTP unreachable, trying next target:", {
+      logger.warn("SMTP unreachable, trying next target:", {
         host: target.host,
         port: target.port,
         code: err?.code,
@@ -460,7 +461,7 @@ export async function sendContactEmail({ fullName, email, phone, message }) {
     },
   });
 
-  console.info("Contact email sent:", {
+  logger.info("Contact email sent:", {
     to,
     from: fromAddress,
     messageId: info.messageId || messageId,

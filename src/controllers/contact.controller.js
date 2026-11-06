@@ -7,8 +7,8 @@ import {
   isSmtpUnreachableError,
   sendContactEmail,
 } from "../utils/mailer.js";
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import { logger } from "../utils/logger.js";
+import { EMAIL_ERROR, isValidEmail } from "../utils/email.js";
 
 function trimField(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -26,8 +26,8 @@ const submitContact = asyncHandler(async (req, res) => {
   if (!email) {
     throw new ApiError(400, "Email address is required");
   }
-  if (!EMAIL_RE.test(email)) {
-    throw new ApiError(400, "Enter a valid email address");
+  if (!isValidEmail(email)) {
+    throw new ApiError(400, EMAIL_ERROR);
   }
   if (!phone) {
     throw new ApiError(400, "Phone number is required");
@@ -54,9 +54,9 @@ const submitContact = asyncHandler(async (req, res) => {
       throw new ApiError(503, err.message);
     }
     if (err?.code === "INVALID_VISITOR_EMAIL") {
-      throw new ApiError(400, "Enter a valid email address");
+      throw new ApiError(400, EMAIL_ERROR);
     }
-    console.error(
+    logger.error(
       "Contact email failed:",
       Number(err?.responseCode) || err?.code || "unknown",
     );
@@ -69,7 +69,7 @@ const submitContact = asyncHandler(async (req, res) => {
     // Local Windows often cannot open cPanel SMTP (465/587 timed out from this PC).
     // Accept the form so UI can be tested; live/VPS still sends the email.
     if (isSmtpUnreachableError(err) && process.platform === "win32") {
-      console.warn(
+      logger.warn(
         "Contact form accepted locally; SMTP is blocked from this computer. Email will send from the VPS.",
       );
       return res

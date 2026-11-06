@@ -1,10 +1,13 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import helmet from "helmet";
+import compression from "compression";
 import { ErrorHandler } from "./utils/ErrorHanlder.js";
 import { ApiError } from "./utils/ApiError.js";
 import { ApiResponse } from "./utils/ApiResponse.js";
 import { getUploadsRoot } from "./utils/localFileStore.js";
+import { requestTimeout } from "./middlewares/requestTimeout.js";
 import mongoose from "mongoose";
 import authRouter from "./routes/auth.routes.js";
 import userRouter from "./routes/user.routes.js";
@@ -16,8 +19,18 @@ import maintenanceRouter from "./routes/maintenance.routes.js";
 import inspectionRouter from "./routes/inspection.routes.js";
 import uploadRouter from "./routes/upload.routes.js";
 import contactRouter from "./routes/contact.routes.js";
+import configRouter from "./routes/config.routes.js";
 
 const app = express();
+
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: false,
+  }),
+);
+app.use(compression());
+app.use(requestTimeout());
 
 app.get("/", (_req, res) => {
   res.send("server running — OK");
@@ -73,6 +86,7 @@ const apiRoutes = [
   ["/inspections", inspectionRouter],
   ["/upload", uploadRouter],
   ["/contact", contactRouter],
+  ["/config", configRouter],
 ];
 
 for (const prefix of ["/api/v1", "/api"]) {
@@ -85,6 +99,6 @@ app.use((_req, _res, next) => {
   next(new ApiError(404, "Route not found"));
 });
 
-// app.use(ErrorHandler);
+app.use(ErrorHandler);
 
 export { app };

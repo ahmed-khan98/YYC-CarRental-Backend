@@ -45,6 +45,11 @@ carSchema.pre("findOneAndDelete", function blockHardCarDelete(next) {
   next(new Error("Cars cannot be hard-deleted. Use status deactive instead."));
 });
 
+carSchema.index({ status: 1, createdAt: -1 });
+carSchema.index({ locationId: 1, status: 1 });
+carSchema.index({ category: 1, status: 1 });
+carSchema.index({ isAvailable: 1, status: 1 });
+
 carSchema.plugin(mongooseAggregatePaginate);
 
 export const CAR_STATUS_ACTIVE = "active";

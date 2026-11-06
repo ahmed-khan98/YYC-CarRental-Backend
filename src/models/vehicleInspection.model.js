@@ -51,5 +51,9 @@ const vehicleInspectionSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+vehicleInspectionSchema.index({ bookingId: 1, type: 1 });
+vehicleInspectionSchema.index({ carId: 1, createdAt: -1 });
+vehicleInspectionSchema.index({ createdAt: -1 });
+
 vehicleInspectionSchema.plugin(mongooseAggregatePaginate);
 export const VehicleInspection = mongoose.model("VehicleInspection", vehicleInspectionSchema);

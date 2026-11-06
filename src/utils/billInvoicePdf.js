@@ -7,9 +7,11 @@ import { Location } from "../models/location.model.js";
 import { User } from "../models/user.model.js";
 import { VehicleInspection } from "../models/vehicleInspection.model.js";
 import { uploadPdfToStorage } from "../utils/localFileStore.js";
+import { logger } from "./logger.js";
 import { formatAppDateTime } from "./timeFormat.js";
 import {
   getBillEntryTotals,
+  isStandalonePaidCharge,
   resolveBillEntryTotalAmount,
   resolvePhaseBillEntries,
 } from "./billing.js";
@@ -34,6 +36,7 @@ export {
 import { calculateRentalDays, calculateTaxAmount, calculateGrandTotal } from "./rentalPricing.js";
 import { calculateServiceCharge } from "./serviceCharge.js";
 import { isExtraDriverService } from "./extraDriver.js";
+import { isUnlimitedMileageService } from "./unlimitedMileage.js";
 import {
   formatServiceSnapshotsForDetail,
   resolveBookedDailyRate,
@@ -79,6 +82,11 @@ const FUEL_LABELS = {
 
 const INVOICE_ZEBRA_WHITE = "FFFFFF";
 const INVOICE_ZEBRA_GREY = "F2F2F2";
+const INVOICE_PAID_GREEN = "157A3A";
+const INVOICE_DUE_RED = "B42318";
+const INVOICE_PAID_FILL = "F3FBF6";
+const INVOICE_PAID_TOTAL_FILL = "DDF3E6";
+const INVOICE_DUE_FILL = "FDECEC";
 const INVOICE_ROW_BORDER_XML =
   `<w:tcBorders>` +
   `<w:top w:val="single" w:sz="8" w:space="0" w:color="C8C8C8"/>` +
@@ -417,6 +425,46 @@ function buildPaymentNotes(checkInPaid, checkOutPaid) {
   return notes;
 }
 
+function sumStandalonePaidByVia(charges, paidVia) {
+  return moneyNum(
+    charges
+      .filter((item) => isStandalonePaidCharge(item) && item.paidVia === paidVia)
+      .reduce((sum, item) => sum + moneyNum(resolveBillEntryTotalAmount(item)), 0),
+  );
+}
+
+export function buildFullInvoicePaymentBreakdown({
+  checkInPaid = 0,
+  checkOutPaid = 0,
+  depositPaid = 0,
+  eTransferPaid = 0,
+  totalPaid = 0,
+  amountDue = 0,
+  unpaidETransfer = 0,
+}) {
+  const rows = [];
+  if (checkInPaid > 0) rows.push({ label: "Paid at check-in", amount: checkInPaid, tone: "paid" });
+  if (checkOutPaid > 0) rows.push({ label: "Paid at check-out", amount: checkOutPaid, tone: "paid" });
+  if (depositPaid > 0) rows.push({ label: "Paid from deposit", amount: depositPaid, tone: "paid" });
+  if (eTransferPaid > 0) rows.push({ label: "Paid by e-transfer", amount: eTransferPaid, tone: "paid" });
+  if (totalPaid > 0) rows.push({ label: "Total paid", amount: totalPaid, tone: "totalPaid" });
+  if (amountDue > 0) {
+    const dueIsETransfer = moneyNum(unpaidETransfer) === moneyNum(amountDue);
+    rows.push({
+      label: dueIsETransfer ? "Balance due (e-transfer)" : "Balance due",
+      amount: amountDue,
+      tone: "due",
+    });
+  }
+  return rows;
+}
+
+export function buildFullInvoicePaymentNotes(input) {
+  return buildFullInvoicePaymentBreakdown(input).map(
+    (row) => `${row.label}: ${moneyLabel(row.amount)}`,
+  );
+}
+
 function excessKmPlaceholderLine(booking, car, days) {
   const dailyLimit = resolveBookedDailyMileageLimit(booking, car);
   const includedKm =
@@ -539,7 +587,7 @@ function buildCheckOutInvoiceScope(booking, extras = {}) {
   const checkOutPaid = resolveCheckOutPaidForInvoice(booking, extras);
 
   const paidManualCharges = chargeEntries
-    .filter((item) => item.source === "manual" && item.status === "paid")
+    .filter(isStandalonePaidCharge)
     .reduce((sum, item) => sum + moneyNum(resolveBillEntryTotalAmount(item)), 0);
   const lineTotals = totalsFromLines(lines, 0);
   const unpaidAfterPayments = Math.max(0, moneyNum(lineTotals.totalAmount - checkOutPaid));
@@ -648,12 +696,36 @@ export function resolveFullInvoiceScope(booking, extras = {}) {
   const payments = entries.filter((item) => item.entryType === "payment" && item.status !== "refund");
   const paymentEntriesTotal = payments.reduce((sum, item) => sum + moneyNum(item.amount), 0);
   const paidManualCharges = charges
-    .filter((item) => item.source === "manual" && item.status === "paid")
+    .filter(isStandalonePaidCharge)
     .reduce((sum, item) => sum + moneyNum(resolveBillEntryTotalAmount(item)), 0);
   const lineTotals = totalsFromLines(lines, 0);
   const unpaidAfterPayments = Math.max(0, moneyNum(lineTotals.totalAmount - paymentEntriesTotal));
   const chargeCredit = Math.min(paidManualCharges, unpaidAfterPayments);
   const paymentReceived = moneyNum(paymentEntriesTotal + chargeCredit);
+  const checkInPaid = resolveCheckInPaidForInvoice(booking, extras);
+  const checkOutPaid = resolveCheckOutPaidForInvoice(booking, extras);
+  const depositPaid = sumStandalonePaidByVia(charges, "deposit");
+  const eTransferPaid = sumStandalonePaidByVia(charges, "e_transfer");
+  const unpaidETransfer = moneyNum(
+    charges
+      .filter(
+        (item) =>
+          item.paidVia === "e_transfer" &&
+          item.status !== "paid" &&
+          item.status !== "refund",
+      )
+      .reduce((sum, item) => sum + moneyNum(resolveBillEntryTotalAmount(item)), 0),
+  );
+  const totals = totalsFromLines(lines, paymentReceived);
+  const paymentBreakdown = buildFullInvoicePaymentBreakdown({
+    checkInPaid,
+    checkOutPaid,
+    depositPaid,
+    eTransferPaid,
+    totalPaid: totals.paymentReceived,
+    amountDue: totals.amountDue,
+    unpaidETransfer,
+  });
   const checkoutDetails =
     booking.checkInMileage != null || booking.checkOutMileage != null
       ? {
@@ -668,7 +740,11 @@ export function resolveFullInvoiceScope(booking, extras = {}) {
     title: "Full Invoice",
     lines,
     checkoutDetails,
-    ...totalsFromLines(lines, paymentReceived),
+    checkInPaid,
+    checkOutPaid,
+    paymentBreakdown,
+    paymentNotes: paymentBreakdown.map((row) => `${row.label}: ${moneyLabel(row.amount)}`),
+    ...totals,
   };
 }
 
@@ -808,11 +884,15 @@ export async function buildInvoicePartyContext(booking) {
     normalizeBookingDate(booking.returnDate),
     normalizeTimeTo24h(booking.returnTime),
   );
-  const dailyMileageLimit = car
-    ? resolveBookedDailyMileageLimit(booking, car)
-    : booking.bookedDailyMileageLimit;
-  const includedKm =
-    dailyMileageLimit != null && Number.isFinite(Number(dailyMileageLimit))
+  const hasUnlimitedMileage = booking.serviceSnapshots?.some(isUnlimitedMileageService) ?? false;
+  const dailyMileageLimit = hasUnlimitedMileage
+    ? null
+    : car
+      ? resolveBookedDailyMileageLimit(booking, car)
+      : booking.bookedDailyMileageLimit;
+  const includedKm = hasUnlimitedMileage
+    ? "Unlimited"
+    : dailyMileageLimit != null && Number.isFinite(Number(dailyMileageLimit))
       ? Math.round(Number(dailyMileageLimit) * days)
       : null;
 
@@ -924,7 +1004,7 @@ export async function attachInvoiceToBillEntry(booking, entry) {
     const upload = await uploadPdfToStorage(pdfBuffer, "bill-invoices");
     entry.invoicePdfUrl = upload.secure_url;
   } catch (err) {
-    console.error("Bill invoice upload failed:", {
+    logger.error("Bill invoice upload failed:", {
       bookingId: String(booking?._id ?? ""),
       message: err?.message,
     });
@@ -977,7 +1057,15 @@ function classifyInvoiceRow(rowXml) {
   const text = invoiceRowPlainText(rowXml);
   if (/Description/.test(text) && /Days\s*\/\s*Qty/.test(text)) return "header";
   if (/SECURITY\s*DEPOSIT/i.test(text)) return "deposit";
-  if (/TOTAL(\s*DUE)?/i.test(text) && !/Total Loss/i.test(text)) return "total";
+  if (/^TOTAL(\s*DUE)?\b/i.test(text) && !/^Total paid/i.test(text)) {
+    return "total";
+  }
+  if (
+    /^Paid(\b|$)/.test(text) ||
+    /Paid at |Paid from |Paid by |Total paid|Balance due|Amount due/.test(text)
+  ) {
+    return "payment";
+  }
   if (/Subtotal/.test(text) || /GST\s*\(5%\)/.test(text)) return "summary";
   return "line";
 }
@@ -1049,7 +1137,9 @@ function styleInvoiceTableRows(xml) {
   let lineIndex = 0;
   const styledRows = rows.map((row) => {
     const kind = classifyInvoiceRow(row);
-    if (kind === "header" || kind === "total" || kind === "deposit") return row;
+    if (kind === "header" || kind === "total" || kind === "deposit" || kind === "payment") {
+      return row;
+    }
     if (kind === "summary") return styleInvoiceRow(row);
     const fill = lineIndex % 2 === 0 ? INVOICE_ZEBRA_WHITE : INVOICE_ZEBRA_GREY;
     lineIndex += 1;
@@ -1066,17 +1156,18 @@ function invoiceTableCell(width, innerXml, { fill = INVOICE_ZEBRA_WHITE } = {}) 
   return (
     `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/>` +
     INVOICE_ROW_BORDER_XML +
-    `${shade}<w:tcMar><w:top w:w="90" w:type="dxa"/><w:left w:w="100" w:type="dxa"/>` +
-    `<w:bottom w:w="90" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tcMar>` +
+    `${shade}<w:tcMar><w:top w:w="60" w:type="dxa"/><w:left w:w="100" w:type="dxa"/>` +
+    `<w:bottom w:w="60" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tcMar>` +
     `</w:tcPr>${innerXml}</w:tc>`
   );
 }
 
-function invoiceCellParagraph(value, { alignRight = false, bold = false, size } = {}) {
+function invoiceCellParagraph(value, { alignRight = false, bold = false, size, color } = {}) {
   const jc = alignRight ? `<w:pPr><w:jc w:val="right"/></w:pPr>` : "";
   const sz = size ? `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>` : "";
   const weight = bold ? `<w:b/><w:bCs/>` : "";
-  const rPr = sz || weight ? `<w:rPr>${weight}${sz}</w:rPr>` : "";
+  const colorXml = color ? `<w:color w:val="${color}"/>` : "";
+  const rPr = sz || weight || colorXml ? `<w:rPr>${weight}${colorXml}${sz}</w:rPr>` : "";
   return `<w:p>${jc}<w:r>${rPr}<w:t>${escapeXml(value)}</w:t></w:r></w:p>`;
 }
 
@@ -1092,7 +1183,7 @@ function buildInvoiceLineRow(line, index) {
     invoiceTableCell(5400, invoiceCellParagraph(description), { fill }) +
     invoiceTableCell(1680, invoiceCellParagraph(rate, { alignRight: true }), { fill }) +
     invoiceTableCell(1680, invoiceCellParagraph(line.qtyLabel ?? "", { alignRight: true }), { fill }) +
-    invoiceTableCell(1680, invoiceCellParagraph(moneyLabel(line.amount), { alignRight: true, bold: true }), { fill }) +
+    invoiceTableCell(1680, invoiceCellParagraph(moneyLabel(line.amount), { alignRight: true }), { fill }) +
     `</w:tr>`
   );
 }
@@ -1135,7 +1226,15 @@ function replaceInvoiceLineRows(xml, lines) {
   return xml.slice(0, tableStart) + prefix + kept.join("") + "</w:tbl>" + xml.slice(tableEnd + 8);
 }
 
-function fillLastCellAmount(rowXml, amount) {
+function ensureBoldInCell(cellXml) {
+  if (/<w:b[\s/>]/.test(cellXml)) return cellXml;
+  if (cellXml.includes("<w:rPr>")) {
+    return cellXml.replace(/<w:rPr>/g, "<w:rPr><w:b/><w:bCs/>");
+  }
+  return cellXml.replace(/<w:r>/g, "<w:r><w:rPr><w:b/><w:bCs/></w:rPr>");
+}
+
+function fillLastCellAmount(rowXml, amount, { bold = false } = {}) {
   const parts = rowXml.split("</w:tc>");
   if (parts.length < 2) return rowXml;
   const last = parts.length - 2;
@@ -1147,15 +1246,16 @@ function fillLastCellAmount(rowXml, amount) {
   if (/<w:p[\s\S]*<\/w:p>/.test(parts[last])) {
     parts[last] = parts[last].replace(
       /<w:p[\s\S]*<\/w:p>/,
-      invoiceCellParagraph(value, { alignRight: true, bold: true }),
+      invoiceCellParagraph(value, { alignRight: true, bold }),
     );
   } else {
-    parts[last] += invoiceCellParagraph(value, { alignRight: true, bold: true });
+    parts[last] += invoiceCellParagraph(value, { alignRight: true, bold });
   }
+  if (bold) parts[0] = ensureBoldInCell(parts[0]);
   return parts.join("</w:tc>");
 }
 
-function fillLabeledAmountRow(xml, labelRe, amount) {
+function fillLabeledAmountRow(xml, labelRe, amount, { bold = false } = {}) {
   const marker = "<w:t>Description</w:t>";
   const descPos = xml.indexOf(marker);
   if (descPos < 0) return xml;
@@ -1179,7 +1279,7 @@ function fillLabeledAmountRow(xml, labelRe, amount) {
   }
 
   const nextRows = rows.map((row) =>
-    labelRe.test(invoiceRowPlainText(row)) ? fillLastCellAmount(row, amount) : row,
+    labelRe.test(invoiceRowPlainText(row)) ? fillLastCellAmount(row, amount, { bold }) : row,
   );
   return xml.slice(0, tableStart) + prefix + nextRows.join("") + "</w:tbl>" + xml.slice(tableEnd + 8);
 }
@@ -1191,32 +1291,92 @@ function stripTotalDueReturnNote(xml) {
     .replace("<w:t>TOTAL </w:t>", "<w:t>TOTAL</w:t>");
 }
 
+function paymentSummaryToneStyle(tone) {
+  if (tone === "due") {
+    return { color: INVOICE_DUE_RED, fill: INVOICE_DUE_FILL, bold: true };
+  }
+  if (tone === "totalPaid") {
+    return { color: INVOICE_PAID_GREEN, fill: INVOICE_PAID_TOTAL_FILL, bold: true };
+  }
+  return { color: INVOICE_PAID_GREEN, fill: INVOICE_PAID_FILL, bold: false };
+}
+
+function buildPaymentSummaryRow({ label, amount, tone }) {
+  const style = paymentSummaryToneStyle(tone);
+  const labelXml = invoiceCellParagraph(label, {
+    bold: style.bold,
+    color: style.color,
+  });
+  const amountXml = invoiceCellParagraph(moneyLabel(amount), {
+    alignRight: true,
+    bold: style.bold,
+    color: style.color,
+  });
+  const empty = invoiceCellParagraph("");
+  return (
+    `<w:tr><w:trPr>${INVOICE_ROW_TR_BORDERS_XML}</w:trPr>` +
+    invoiceTableCell(5400, labelXml, { fill: style.fill }) +
+    invoiceTableCell(1680, empty, { fill: style.fill }) +
+    invoiceTableCell(1680, empty, { fill: style.fill }) +
+    invoiceTableCell(1680, amountXml, { fill: style.fill }) +
+    `</w:tr>`
+  );
+}
+
+function invoicePaymentSummaryRows(invoice) {
+  if (invoice.kind === "full") {
+    if (invoice.paymentBreakdown?.length) return invoice.paymentBreakdown;
+    return buildFullInvoicePaymentBreakdown({
+      totalPaid: invoice.paymentReceived,
+      amountDue: invoice.amountDue,
+    });
+  }
+  const rows = [];
+  if (invoice.paymentReceived > 0) {
+    rows.push({ label: "Paid", amount: invoice.paymentReceived, tone: "paid" });
+  }
+  if (invoice.amountDue > 0) {
+    rows.push({ label: "Balance due", amount: invoice.amountDue, tone: "due" });
+  }
+  return rows;
+}
+
+function insertPaymentSummaryRows(xml, invoice) {
+  const summary = invoicePaymentSummaryRows(invoice);
+  if (!summary.length) return xml;
+
+  const marker = "<w:t>Description</w:t>";
+  const descPos = xml.indexOf(marker);
+  if (descPos < 0) return xml;
+  const tableStart = findInvoiceTableStart(xml, descPos);
+  const tableEnd = xml.indexOf("</w:tbl>", descPos);
+  if (tableStart < 0 || tableEnd < 0) return xml;
+
+  const table = xml.slice(tableStart, tableEnd + 8);
+  const firstRow = table.indexOf("<w:tr");
+  if (firstRow < 0) return xml;
+
+  const prefix = table.slice(0, firstRow);
+  const body = table.slice(firstRow, table.lastIndexOf("</w:tbl>"));
+  const rows = [];
+  let cursor = 0;
+  while (cursor < body.length) {
+    const rowStart = body.indexOf("<w:tr", cursor);
+    if (rowStart < 0) break;
+    const rowEnd = body.indexOf("</w:tr>", rowStart);
+    if (rowEnd < 0) break;
+    rows.push(body.slice(rowStart, rowEnd + 7));
+    cursor = rowEnd + 7;
+  }
+
+  const totalIndex = rows.findLastIndex((row) => classifyInvoiceRow(row) === "total");
+  if (totalIndex < 0) return xml;
+  rows.splice(totalIndex + 1, 0, ...summary.map(buildPaymentSummaryRow));
+  return xml.slice(0, tableStart) + prefix + rows.join("") + "</w:tbl>" + xml.slice(tableEnd + 8);
+}
+
 function fillPaidAndStatus(xml, invoice) {
-  const statusLabel = invoice.statusLabel || paymentStatusLabel(invoice.status);
-  const paid = moneyLabel(invoice.paymentReceived);
-  const due = moneyLabel(invoice.amountDue ?? 0);
-  const extra = [
-    ...(invoice.paymentNotes ?? []),
-    invoice.kind === "check_in" || invoice.kind === "check_out"
-      ? invoice.paymentReceived > 0
-        ? `Paid: ${paid} · Balance due: ${due}`
-        : `Balance due: ${due}`
-      : invoice.paymentReceived > 0
-        ? `This invoice paid: ${paid} · Balance due: ${due}`
-        : `Amount due: ${due}`,
-    `Payment status: ${statusLabel}`,
-  ];
-  const totalPos = xml.search(/<w:t[^>]*>TOTAL\s*/);
-  if (totalPos < 0) return xml;
-  const cellEnd = xml.indexOf("</w:tc>", totalPos);
-  if (cellEnd < 0) return xml;
-  const lines = extra
-    .map(
-      (text) =>
-        `<w:p><w:r><w:rPr><w:color w:val="FFFFFF"/><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t>${escapeXml(text)}</w:t></w:r></w:p>`,
-    )
-    .join("");
-  return xml.slice(0, cellEnd) + lines + xml.slice(cellEnd);
+  return insertPaymentSummaryRows(xml, invoice);
 }
 
 function fillPolicyNo(xml, policyNo) {
@@ -1257,12 +1417,26 @@ function fillInvoiceNumberUnderHeading(xml, invoiceNumber) {
   return next.slice(0, pEnd + 6) + line + next.slice(pEnd + 6);
 }
 
-function stripAgreementFromHeader(headerXml) {
-  return headerXml
+function headerTagForInvoiceKind(kind) {
+  if (kind === "check_in") return "CHECK-IN";
+  if (kind === "check_out") return "CHECK-OUT";
+  return "";
+}
+
+export function applyInvoiceHeaderTag(headerXml, kind) {
+  const stripped = headerXml
     .replace(/<w:t[^>]*>VEHICLE RENTAL <\/w:t>/g, "<w:t></w:t>")
     .replace(/<w:t[^>]*>AGREEMENT  \|<\/w:t>/g, "<w:t></w:t>")
     .replace(/<w:t[^>]*>AGREEMENT \|<\/w:t>/g, "<w:t></w:t>")
-    .replace(/VEHICLE RENTAL AGREEMENT\s*\|?\s*/g, "");
+    .replace(/VEHICLE RENTAL AGREEMENT\s*\|?\s*/g, "")
+    .replace(/CHECK-IN\s*\|\s*/g, "")
+    .replace(/CHECK-OUT\s*\|\s*/g, "");
+  const tag = headerTagForInvoiceKind(kind);
+  if (!tag) return stripped;
+  return stripped.replace(
+    /<w:t([^>]*)>info@yyccarrental\.com(\s*\|)<\/w:t>/,
+    `<w:t$1>${tag}  |  info@yyccarrental.com$2</w:t>`,
+  );
 }
 
 function findParagraphStart(xml, fromPos) {
@@ -1442,6 +1616,34 @@ function fillPrintNameAndDate(xml) {
   return xml;
 }
 
+function stripTrailingEmptyParagraphs(xml) {
+  const sectPr = xml.lastIndexOf("<w:sectPr");
+  if (sectPr < 0) return xml;
+  let before = xml.slice(0, sectPr);
+  const after = xml.slice(sectPr);
+  const emptyPara =
+    /(?:<w:p\b[^>]*\/>|<w:p\b[^>]*>\s*(?:<w:pPr>[\s\S]*?<\/w:pPr>\s*)?<\/w:p>)\s*$/;
+  while (emptyPara.test(before)) {
+    before = before.replace(emptyPara, "");
+  }
+  return before + after;
+}
+
+function compactEmptyDamageNotesBox(xml) {
+  const marker = "Pre-existing damage noted at pick-up";
+  const pos = xml.indexOf(marker);
+  if (pos < 0) return xml;
+  const tableStart = findOpenTag(xml, "<w:tbl", pos);
+  if (tableStart < 0) return xml;
+  const tableEnd = findMatchingClose(xml, "<w:tbl", "</w:tbl>", tableStart);
+  if (tableEnd < 0) return xml;
+  const table = xml
+    .slice(tableStart, tableEnd)
+    .replace(/w:bottom w:w="220"/g, 'w:bottom w:w="40"')
+    .replace(/w:top w:w="60"/g, 'w:top w:w="20"');
+  return xml.slice(0, tableStart) + table + xml.slice(tableEnd);
+}
+
 function fillHeaderBlanks(xml, invoice) {
   const issued = invoice.dateIssued || formatAppDateTime(invoice.issuedAt);
   const ordered = [
@@ -1485,9 +1687,9 @@ export function fillBillInvoiceDocx(templateBuffer, invoiceInput) {
   xml = fillInvoiceNumberUnderHeading(xml, invoice.invoiceNumber);
   xml = fillPolicyNo(xml, invoice.policyNo);
   xml = replaceInvoiceLineRows(xml, invoice.lines);
-  xml = fillLabeledAmountRow(xml, /^Subtotal/, invoice.subtotal);
+  xml = fillLabeledAmountRow(xml, /^Subtotal/, invoice.subtotal, { bold: true });
   xml = fillLabeledAmountRow(xml, /^GST/, invoice.taxAmount);
-  xml = fillLabeledAmountRow(xml, /TOTAL\s*DUE/i, invoice.totalAmount);
+  xml = fillLabeledAmountRow(xml, /TOTAL\s*DUE/i, invoice.totalAmount, { bold: true });
   xml = stripTotalDueReturnNote(xml);
   xml = fillPaidAndStatus(xml, invoice);
   xml = stripInvoiceInitialsLine(xml);
@@ -1503,11 +1705,13 @@ export function fillBillInvoiceDocx(templateBuffer, invoiceInput) {
   );
   xml = fillPrintNameAndDate(xml);
   xml = styleInvoiceTableRows(xml);
+  xml = compactEmptyDamageNotesBox(xml);
+  xml = stripTrailingEmptyParagraphs(xml);
 
   zip.file("word/document.xml", xml);
   const headerFile = zip.file("word/header1.xml");
   if (headerFile) {
-    zip.file("word/header1.xml", stripAgreementFromHeader(headerFile.asText()));
+    zip.file("word/header1.xml", applyInvoiceHeaderTag(headerFile.asText(), invoice.kind));
   }
   return zip.generate({ type: "nodebuffer" });
 }

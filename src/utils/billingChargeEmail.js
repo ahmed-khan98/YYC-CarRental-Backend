@@ -1,4 +1,6 @@
 import { User } from "../models/user.model.js";
+import { logger } from "./logger.js";
+import { DEFAULT_PRE_AUTHORIZED_AMOUNT } from "./appConfig.js";
 import { getBookingPublicNumber } from "./billInvoicePdf.js";
 import { resolveBillEntryTotalAmount } from "./billing.js";
 import {
@@ -37,13 +39,16 @@ function sanitizeFilename(name) {
   return raw.replace(/[^\w.\- ()]/g, "_").slice(0, 120);
 }
 
-function paymentMethodExplanation(entry, remainingDeposit) {
+function paymentMethodExplanation(entry, remainingDeposit, depositAmount) {
   if (entry?.paidVia === "deposit") {
     const remaining =
       remainingDeposit != null && Number.isFinite(Number(remainingDeposit))
         ? ` Remaining security deposit: ${formatMoney(remainingDeposit)}.`
         : "";
-    return `This bill was charged from your $800 security deposit.${remaining}`;
+    const hold = Number.isFinite(Number(depositAmount)) && Number(depositAmount) > 0
+      ? formatMoney(depositAmount)
+      : formatMoney(DEFAULT_PRE_AUTHORIZED_AMOUNT);
+    return `This bill was charged from your ${hold} security deposit.${remaining}`;
   }
   return "This invoice is unpaid. Please pay by e-transfer.";
 }
@@ -68,7 +73,11 @@ export function buildBillingChargeMailOptions({
   const customerName = customer?.name?.trim() || to || "Customer";
   const title = String(entry?.title || "Additional charge").trim();
   const totalLabel = formatMoney(resolveBillEntryTotalAmount(entry));
-  const explanation = paymentMethodExplanation(entry, remainingDeposit);
+  const explanation = paymentMethodExplanation(
+    entry,
+    remainingDeposit,
+    booking?.securityDepositAmount,
+  );
   const body = chargeDescription(entry);
 
   const text = [
@@ -144,14 +153,14 @@ export async function sendBillingChargeEmail({
     const customer = await User.findById(userId).select("name email");
 
     if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
-      console.info("Billing charge email skipped: missing invoice PDF", {
+      logger.info("Billing charge email skipped: missing invoice PDF", {
         bookingId: String(bookingId),
       });
       return { skipped: true, reason: "no_pdf" };
     }
 
     if (!isValidCustomerEmail(customer?.email)) {
-      console.info("Billing charge email skipped: invalid or undeliverable customer email", {
+      logger.info("Billing charge email skipped: invalid or undeliverable customer email", {
         bookingId: String(bookingId),
         email: customer?.email || null,
       });
@@ -172,10 +181,10 @@ export async function sendBillingChargeEmail({
       info = await sendMail(mailOptions);
     } catch (err) {
       if (isSmtpUnreachableError(err)) throw err;
-      console.warn("Billing charge email retrying after send failure:", err?.code || err?.message);
+      logger.warn("Billing charge email retrying after send failure:", err?.code || err?.message);
       info = await sendMail(mailOptions);
     }
-    console.info("Billing charge email sent:", {
+    logger.info("Billing charge email sent:", {
       bookingId: String(bookingId),
       to: mailOptions.to,
       from: mailOptions.from?.address,

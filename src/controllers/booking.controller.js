@@ -14,7 +14,8 @@ import { ApiError } from "../utils/ApiError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
-import { formatDoc, formatDocs } from "../utils/formatDoc.js";
+import { formatDoc } from "../utils/formatDoc.js";
+import { logger } from "../utils/logger.js";
 import {
   applyCarSnapshot,
   bookingCarPopulate,
@@ -26,8 +27,12 @@ import {
   sanitizeCarForPublic,
 } from "../utils/enrichCar.js";
 import { collectUnavailableCarIds } from "../utils/carAvailability.js";
+import { formatBookingWithIds, formatListBooking } from "../utils/formatBooking.js";
+import { pickupDateRangeMatch } from "../utils/pickupDateRange.js";
 import { rentalPeriodsConflictEitherWay } from "../utils/datesOverlap.js";
 import { calculateRentalDays, isValidRentalPeriod } from "../utils/rentalPricing.js";
+import { bookingWindowError } from "../utils/bookingWindow.js";
+import { getPreAuthorizedAmount } from "../utils/appConfig.js";
 import { calculateServiceCharge } from "../utils/serviceCharge.js";
 import { patchText } from "../utils/patchPayload.js";
 import {
@@ -101,7 +106,7 @@ function queueBookingConfirmationDocuments(bookingId, { sendEmail = true } = {})
     bookingId,
     payload: { sendEmail },
   }).catch((err) => {
-    console.error("Failed to enqueue booking invoice email:", err?.message || err);
+    logger.error("Failed to enqueue booking invoice email:", err?.message || err);
   });
 }
 
@@ -122,7 +127,10 @@ async function findConflictingBooking(
     query._id = { $ne: excludeBookingId };
   }
 
-  const existingBookings = await Booking.find(query);
+  query.status = { $nin: ["cancelled", "completed"] };
+  const existingBookings = await Booking.find(query)
+    .select("pickupDate pickupTime returnDate returnTime status")
+    .lean();
   return existingBookings.find(
     (b) =>
       isActiveBooking(b.status) &&
@@ -184,11 +192,18 @@ async function resolveStoredServiceQuantities(additionalServiceIds = [], service
     normalized.map((entry) => [entry.serviceId, entry.quantity]),
   );
 
+  if (!additionalServiceIds.length) return [];
+
+  const services = await AdditionalService.find({ _id: { $in: additionalServiceIds } })
+    .select("name allowQuantity category")
+    .lean();
+  const byId = new Map(services.map((svc) => [String(svc._id), svc]));
+
   /** @type {Array<{ serviceId: string; quantity: number }>} */
   const stored = [];
 
   for (const svcId of additionalServiceIds) {
-    const svc = await AdditionalService.findById(svcId);
+    const svc = byId.get(String(svcId));
     if (!svc) continue;
 
     const quantity = quantityById[String(svcId)] ?? 1;
@@ -202,11 +217,17 @@ async function resolveStoredServiceQuantities(additionalServiceIds = [], service
   return stored;
 }
 
+function requireBookingWindow(pickupDate) {
+  const error = bookingWindowError(pickupDate);
+  if (error) throw new ApiError(400, error);
+}
+
 const getUnavailableCarIds = asyncHandler(async (req, res) => {
   const { pickupDate, returnDate, pickupTime, returnTime } = req.query;
   if (!pickupDate || !returnDate) {
     return res.status(200).json(new ApiResponse(200, [], "Unavailable cars fetched"));
   }
+  requireBookingWindow(pickupDate);
 
   const unavailable = await collectUnavailableCarIds({
     pickupDate,
@@ -246,21 +267,6 @@ const OVERVIEW_BOOKING_POPULATE = [
   bookingCarPopulate(LIST_CAR_CORE_FIELDS),
 ];
 
-function populatedSnapshot(booking, path) {
-  return booking.populated(path) ? formatDoc(booking.get(path)) : null;
-}
-
-function formatListBooking(booking) {
-  const doc = formatBookingWithIds(booking);
-  return {
-    ...doc,
-    user: populatedSnapshot(booking, "userId"),
-    car: resolveBookingCar(booking),
-    pickupLocation: populatedSnapshot(booking, "pickupLocationId"),
-    dropoffLocation: populatedSnapshot(booking, "dropoffLocationId"),
-  };
-}
-
 const getMyBookings = asyncHandler(async (req, res) => {
   const result = await aggregatePaginate(
     Booking,
@@ -291,9 +297,13 @@ const getMyBookings = asyncHandler(async (req, res) => {
   return res.status(200).json(new ApiResponse(200, items, "Bookings fetched"));
 });
 
+
 const getAdminBookings = asyncHandler(async (req, res) => {
-  const { status } = req.query;
-  const match = status ? { status } : {};
+  const { status, pickupFrom, pickupTo } = req.query;
+  const match = {
+    ...(status ? { status } : {}),
+    ...(pickupDateRangeMatch(pickupFrom, pickupTo) ?? {}),
+  };
   const result = await aggregatePaginate(
     Booking,
     [{ $match: match }, { $sort: { createdAt: -1 } }],
@@ -368,7 +378,8 @@ const getAdminOverview = asyncHandler(async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(5)
       .select("pickupDate totalAmount status carId")
-      .populate(OVERVIEW_BOOKING_POPULATE),
+      .populate(OVERVIEW_BOOKING_POPULATE)
+      .lean(),
   ]);
   await ensureBookingCars(recentBookings);
 
@@ -408,21 +419,6 @@ const LOCATION_DETAIL_FIELDS = "name";
 const CUSTOMER_DETAIL_FIELDS = "name email phone";
 const DETAIL_CAR_FIELDS =
   "make model year licensePlate color category transmission fuelType seats dailyRate imageUrl imageUrls dailyMileageLimit chargePerExtraKm";
-
-function refId(ref) {
-  if (!ref) return undefined;
-  if (typeof ref === "string") return ref;
-  return ref._id?.toString?.() ?? String(ref);
-}
-
-function formatBookingWithIds(booking) {
-  const doc = formatDoc(booking);
-  doc.userId = refId(booking.userId);
-  doc.carId = refId(booking.carId);
-  doc.pickupLocationId = refId(booking.pickupLocationId);
-  doc.dropoffLocationId = refId(booking.dropoffLocationId);
-  return doc;
-}
 
 const getBookingDetail = asyncHandler(async (req, res) => {
   const booking = await Booking.findById(req.params.id);
@@ -551,7 +547,7 @@ const getBookingDetail = asyncHandler(async (req, res) => {
 });
 
 const getBookingById = asyncHandler(async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
+  const booking = await Booking.findById(req.params.id).lean();
   if (!booking) {
     throw new ApiError(404, "Booking not found");
   }
@@ -617,6 +613,7 @@ const createBooking = asyncHandler(async (req, res) => {
   if (!isValidRentalPeriod(pickupDate, pickupTime, returnDate, returnTime)) {
     throw new ApiError(400, "Return must be after pickup");
   }
+  requireBookingWindow(pickupDate);
 
   const { total: totalAmount, ...pricingSnapshot } = await calculateAndSnapshotTotal(
     car,
@@ -654,6 +651,7 @@ const createBooking = asyncHandler(async (req, res) => {
     licenseUrl,
     notes,
     paymentStatus: "pending",
+    securityDepositAmount: await getPreAuthorizedAmount(),
     ...createdByFields(req.user),
   });
 
@@ -723,6 +721,7 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
   if (!isValidRentalPeriod(pickupDate, pickupTime, returnDate, returnTime)) {
     throw new ApiError(400, "Return must be after pickup");
   }
+  requireBookingWindow(pickupDate);
 
   const { total: totalAmount, ...pricingSnapshot } = await calculateAndSnapshotTotal(
     car,
@@ -759,6 +758,7 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
       : undefined,
     notes,
     paymentStatus: "pending",
+    securityDepositAmount: await getPreAuthorizedAmount(),
     ...createdByFields(req.user),
   });
 
@@ -773,6 +773,12 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
 const adminUpdateBooking = asyncHandler(async (req, res) => {
   const booking = await Booking.findById(req.params.id);
   if (!booking) throw new ApiError(404, "Booking not found");
+  if (booking.status === "completed") {
+    throw new ApiError(400, "Completed bookings cannot be edited. Additional charges can still be added.");
+  }
+  if (booking.status === "cancelled") {
+    throw new ApiError(400, "Cancelled bookings cannot be edited");
+  }
 
   const {
     carId,
@@ -846,6 +852,7 @@ const adminUpdateBooking = asyncHandler(async (req, res) => {
   if (!isValidRentalPeriod(nextPickupDate, nextPickupTime, nextReturnDate, nextReturnTime)) {
     throw new ApiError(400, "Return must be after pickup");
   }
+  requireBookingWindow(nextPickupDate);
 
   const conflicting = await findConflictingBooking(
     nextCarId,
@@ -969,7 +976,7 @@ const updateCheckInOutVisibility = asyncHandler(async (req, res) => {
 });
 
 const getCancellationPreview = asyncHandler(async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
+  const booking = await Booking.findById(req.params.id).lean();
   if (!booking) throw new ApiError(404, "Booking not found");
 
   const isOwner = booking.userId.toString() === req.user._id.toString();
@@ -1060,7 +1067,7 @@ async function securityDepositExtras(booking) {
   const checkOut = await VehicleInspection.findOne({
     bookingId: booking._id,
     type: "check_out",
-  }).select("createdAt");
+  }).select("createdAt").lean();
   return checkOut?.createdAt ? { checkOutAt: checkOut.createdAt } : {};
 }
 
@@ -1091,7 +1098,7 @@ function queueBillingInvoiceEmail(bookingId, entryId, extras = {}) {
     extraAttachmentName: extras.attachmentName,
     refresh: extras.refresh === true,
   }).catch((err) => {
-    console.error("Failed to enqueue billing invoice email:", err?.message || err);
+    logger.error("Failed to enqueue billing invoice email:", err?.message || err);
   });
 }
 
@@ -1165,7 +1172,7 @@ const addBillEntry = asyncHandler(async (req, res) => {
       const uploaded = await uploadBillAttachment(req.file);
       attachmentUrl = uploaded?.secure_url;
     } catch (err) {
-      console.error("Bill attachment upload failed:", {
+      logger.error("Bill attachment upload failed:", {
         bookingId: String(booking._id),
         message: err?.message,
       });
@@ -1276,7 +1283,7 @@ const updateBillEntry = asyncHandler(async (req, res) => {
 });
 
 const getFullInvoicePdf = asyncHandler(async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
+  const booking = await Booking.findById(req.params.id).lean();
   if (!booking) throw new ApiError(404, "Booking not found");
 
   const staff = isStaff(req.user);

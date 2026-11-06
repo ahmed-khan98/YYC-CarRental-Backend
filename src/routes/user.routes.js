@@ -7,6 +7,7 @@ import {
   createSubAdmin,
   updateSubAdmin,
   createCustomer,
+  deactivateSubAdmin,
   deleteSubAdmin,
   setUserRole,
 } from "../controllers/user.controller.js";
@@ -19,6 +20,7 @@ router.route("/me").get(verifyJWT, getCurrentUser);
 router.route("/me/profile").patch(verifyJWT, updateProfile);
 router.route("/").get(verifyJWT, checkRole("admin", "sub_admin"), listUsers);
 router.route("/sub-admins").get(verifyJWT, checkRole("admin"), listSubAdmins).post(verifyJWT, checkRole("admin"), createSubAdmin);
+router.route("/sub-admins/:id/deactivate").patch(verifyJWT, checkRole("admin"), deactivateSubAdmin);
 router.route("/sub-admins/:id").patch(verifyJWT, checkRole("admin"), updateSubAdmin).delete(verifyJWT, checkRole("admin"), deleteSubAdmin);
 router.route("/customers").post(verifyJWT, checkRole("admin", "sub_admin"), createCustomer);
 router.route("/:id/role").patch(verifyJWT, checkRole("admin"), setUserRole);

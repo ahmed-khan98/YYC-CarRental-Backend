@@ -18,6 +18,7 @@ import {
   resolveBookedChargePerExtraKm,
 } from "./bookingSnapshot.js";
 import { calculateExtraMileageBilling } from "./extraMileage.js";
+import { isUnlimitedMileageService } from "./unlimitedMileage.js";
 import { isExtraDriverService, resolveBookingExtraDriverCount } from "./extraDriver.js";
 import { calculateServiceCharge } from "./serviceCharge.js";
 import { buildMainDriverCheckInDefaults } from "./mainDriver.js";
@@ -514,16 +515,22 @@ export function buildAgreementContext({
           );
         })();
 
-  const dailyMileageLimit = car
-    ? resolveBookedDailyMileageLimit(booking, car)
-    : booking.bookedDailyMileageLimit;
-  const includedKm =
-    dailyMileageLimit != null && Number.isFinite(Number(dailyMileageLimit))
+  const hasUnlimitedMileage = snapshots.some(isUnlimitedMileageService);
+  const dailyMileageLimit = hasUnlimitedMileage
+    ? null
+    : car
+      ? resolveBookedDailyMileageLimit(booking, car)
+      : booking.bookedDailyMileageLimit;
+  const includedKm = hasUnlimitedMileage
+    ? "Unlimited"
+    : dailyMileageLimit != null && Number.isFinite(Number(dailyMileageLimit))
       ? Math.round(Number(dailyMileageLimit) * days)
       : null;
-  const chargePerExtraKm = car
-    ? resolveBookedChargePerExtraKm(booking, car)
-    : booking.bookedChargePerExtraKm;
+  const chargePerExtraKm = hasUnlimitedMileage
+    ? null
+    : car
+      ? resolveBookedChargePerExtraKm(booking, car)
+      : booking.bookedChargePerExtraKm;
 
   const pickupLabel = [
     pickupLocation?.name,
@@ -1735,16 +1742,44 @@ function drawSignature(page, pngImage, field) {
   });
 }
 
+async function embedSignatureImage(pdfDoc, buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer) || !buffer.length) return null;
+  try {
+    return await pdfDoc.embedPng(buffer);
+  } catch {
+    try {
+      return await pdfDoc.embedJpg(buffer);
+    } catch {
+      return null;
+    }
+  }
+}
+
+export async function overlaySignatureOnPdf(basePdf, signaturePngBuffer) {
+  if (!signaturePngBuffer?.length) {
+    return Buffer.isBuffer(basePdf) ? basePdf : Buffer.from(basePdf);
+  }
+
+  try {
+    const pdfDoc = await PDFDocument.load(basePdf);
+    const signatureImage = await embedSignatureImage(pdfDoc, signaturePngBuffer);
+    if (!signatureImage) {
+      return Buffer.from(await pdfDoc.save());
+    }
+    const overlay = locateAgreementOverlay(pdfDoc);
+
+    drawSignature(resolvePage(pdfDoc, overlay.invoice.pageIndex), signatureImage, overlay.invoice);
+    drawSignature(resolvePage(pdfDoc, overlay.final.pageIndex), signatureImage, overlay.final);
+
+    return Buffer.from(await pdfDoc.save());
+  } catch {
+    return Buffer.isBuffer(basePdf) ? basePdf : Buffer.from(basePdf);
+  }
+}
+
 export async function generateSignedCheckInAgreementPdf(context, signaturePngBuffer) {
   const basePdf = await generateCheckInAgreementPdf(context);
-  const pdfDoc = await PDFDocument.load(basePdf);
-  const pngImage = await pdfDoc.embedPng(signaturePngBuffer);
-  const overlay = locateAgreementOverlay(pdfDoc);
-
-  drawSignature(resolvePage(pdfDoc, overlay.invoice.pageIndex), pngImage, overlay.invoice);
-  drawSignature(resolvePage(pdfDoc, overlay.final.pageIndex), pngImage, overlay.final);
-
-  return Buffer.from(await pdfDoc.save());
+  return overlaySignatureOnPdf(basePdf, signaturePngBuffer);
 }
 
 export function parseSignatureDataUrl(dataUrl) {

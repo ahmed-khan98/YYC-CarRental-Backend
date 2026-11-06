@@ -1,4 +1,5 @@
 import { Booking } from "../models/booking.model.js";
+import { logger } from "./logger.js";
 import { EMAIL_JOB_TYPE, EmailJob } from "../models/emailJob.model.js";
 import { VehicleInspection } from "../models/vehicleInspection.model.js";
 import {
@@ -175,7 +176,7 @@ async function processCheckOutInvoice(job) {
     inspection.signedPdfUrl = uploaded.secure_url;
     await inspection.save();
   } catch (err) {
-    console.error("Check-out agreement store failed after invoice email:", err?.message || err);
+    logger.error("Check-out agreement store failed after invoice email:", err?.message || err);
   }
 }
 
@@ -259,7 +260,7 @@ async function tick() {
       await markEmailJobFailure(job, err, { permanent: isPermanentEmailFailure(err) });
     }
   } catch (err) {
-    console.error("Email job worker tick failed:", err?.message || err);
+    logger.error("Email job worker tick failed:", err?.message || err);
   } finally {
     tick.running = false;
   }
@@ -267,7 +268,7 @@ async function tick() {
 
 export function startEmailJobWorker() {
   const pollMs = Number(process.env.EMAIL_JOB_POLL_MS) || DEFAULT_POLL_MS;
-  console.log(`✓ Email job worker every ${pollMs}ms`);
+  logger.info(`Email job worker every ${pollMs}ms`);
   tick();
   const timer = setInterval(tick, pollMs);
   if (typeof timer.unref === "function") timer.unref();

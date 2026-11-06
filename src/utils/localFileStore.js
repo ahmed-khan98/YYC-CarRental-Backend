@@ -132,10 +132,36 @@ export async function uploadPdfToStorage(buffer, folder = "documents") {
   return saveBuffer(buffer, folder, { ext: ".pdf", mimetype: "application/pdf" });
 }
 
+function bufferFromDataUrl(url) {
+  const match = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,([\s\S]+)$/i.exec(String(url));
+  if (!match) return null;
+  try {
+    const isBase64 = Boolean(match[2]);
+    return Buffer.from(decodeURIComponent(match[3]), isBase64 ? "base64" : "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRemoteBuffer(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!response.ok) return null;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return buffer.length ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveLocalUploadPath(url) {
   if (!url) return null;
 
-  let pathname = String(url);
+  let pathname = String(url).trim();
   try {
     if (/^https?:\/\//i.test(pathname)) {
       pathname = new URL(pathname).pathname;
@@ -144,6 +170,13 @@ export function resolveLocalUploadPath(url) {
     return null;
   }
 
+  pathname = pathname.split("?")[0].split("#")[0];
+  if (!pathname.startsWith("/")) pathname = `/${pathname}`;
+  try {
+    pathname = decodeURI(pathname);
+  } catch {
+    // keep the raw path when it is not URI-encoded
+  }
   if (!pathname.startsWith("/uploads/")) return null;
 
   const parts = pathname
@@ -154,25 +187,40 @@ export function resolveLocalUploadPath(url) {
 
   const root = path.resolve(getUploadsRoot());
   const abs = path.resolve(root, ...parts);
-  const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
-  if (abs !== root && !abs.startsWith(rootWithSep)) return null;
+  const relative = path.relative(root, abs);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
   return abs;
 }
 
 export async function readStoredFile(url) {
-  const localPath = resolveLocalUploadPath(url);
+  if (!url) return null;
+  const raw = String(url).trim();
+  if (!raw) return null;
+
+  if (raw.startsWith("data:")) {
+    return bufferFromDataUrl(raw);
+  }
+
+  const localPath = resolveLocalUploadPath(raw);
   if (localPath) {
     try {
       return await fs.readFile(localPath);
     } catch {
-      return null;
+      // Not on this disk (common for prod /uploads URLs on localhost). Fall back to HTTP.
     }
   }
 
-  if (!url || !/^https?:\/\//i.test(url)) return null;
-  const response = await fetch(url);
-  if (!response.ok) return null;
-  return Buffer.from(await response.arrayBuffer());
+  if (/^https?:\/\//i.test(raw)) {
+    const remote = await fetchRemoteBuffer(raw);
+    if (remote) return remote;
+  }
+
+  const publicUrl = resolvePublicMediaUrl(raw);
+  if (publicUrl && publicUrl !== raw && /^https?:\/\//i.test(publicUrl)) {
+    return fetchRemoteBuffer(publicUrl);
+  }
+
+  return null;
 }
 
 export async function fetchStoredPdf(url) {

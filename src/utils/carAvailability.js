@@ -13,7 +13,9 @@ export async function collectUnavailableCarIds({
 }) {
   const bookings = await Booking.find({
     status: { $nin: ["cancelled", "completed"] },
-  }).select("carId pickupDate pickupTime returnDate returnTime status");
+  })
+    .select("carId pickupDate pickupTime returnDate returnTime status")
+    .lean();
 
   const unavailable = new Set();
   for (const booking of bookings) {

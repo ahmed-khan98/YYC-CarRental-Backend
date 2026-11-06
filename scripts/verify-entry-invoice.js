@@ -257,7 +257,7 @@ assert(full.lines.some((line) => /rental/i.test(line.description)), "full invoic
 assert(full.lines.some((line) => line.description === "Child Seat"), "full invoice includes additional services");
 assert(full.lines.some((line) => /mileage/i.test(line.description)), "full invoice includes extra KM");
 assert(full.lines.some((line) => line.description === "Fuel refill"), "full invoice includes additional charges");
-assert(full.paymentReceived === 121.8, "full invoice counts payments plus unpaid remainder of paid charges");
+assert(full.paymentReceived === 95.55, "full invoice does not credit checkout fuel already covered by payment");
 assert(buildFullInvoiceNumber(booking) === "2DD5249A-ALL", "full invoice number is suffix-ALL");
 
 const adminMatched = {
@@ -275,7 +275,7 @@ const adminMatched = {
     { _id: "s2", title: "Extra Driver", amount: 20, entryType: "charge", source: "system", systemKey: "service:svc2", status: "unpaid" },
     { _id: "m1", title: "Extra Mileage", amount: 4, entryType: "charge", source: "system", systemKey: "extra_mileage", status: "unpaid" },
     { _id: "f1", title: "Fuel refill", amount: 25, entryType: "charge", source: "manual", status: "paid", taxAmount: 1.25, totalAmount: 26.25 },
-    { _id: "p1", title: "out of province fine", amount: 50, entryType: "charge", source: "manual", status: "paid", taxAmount: 2.5, totalAmount: 52.5 },
+    { _id: "p1", title: "out of province fine", amount: 50, entryType: "charge", source: "manual", status: "paid", paidVia: "e_transfer", taxAmount: 2.5, totalAmount: 52.5 },
     { _id: "pay1", title: "Check-In Payment", amount: 50, entryType: "payment", source: "manual", status: "paid" },
     { _id: "pay2", title: "Check-Out Payment", amount: 45.55, entryType: "payment", source: "manual", status: "paid" },
   ],
@@ -284,6 +284,43 @@ const fullMatched = resolveFullInvoiceScope(adminMatched, { car: { category: "se
 assert(fullMatched.totalAmount === 148.05, "full invoice total matches admin 148.05");
 assert(fullMatched.paymentReceived === 148.05, "paid must not double-count fuel already in checkout payment");
 assert(fullMatched.amountDue === 0 && fullMatched.status === "paid", "fully collected bill is Paid with $0 due");
+
+const overspeedBooking = {
+  pickupDate: "2026-09-26",
+  pickupTime: "10:00",
+  returnDate: "2026-09-30",
+  returnTime: "10:00",
+  bookedDailyRate: 58,
+  extraMileageKm: 900,
+  extraMileageCharge: 450,
+  billEntries: [
+    { title: "SUV Rental", amount: 232, entryType: "charge", source: "system", systemKey: "rental", status: "unpaid" },
+    { title: "Child Seat", amount: 7, entryType: "charge", source: "system", systemKey: "service:child", status: "unpaid" },
+    { title: "out of province", amount: 80, entryType: "charge", source: "system", systemKey: "service:oop", status: "unpaid" },
+    { title: "Additional Driver Fee", amount: 40, entryType: "charge", source: "system", systemKey: "service:driver", status: "unpaid" },
+    { title: "Extra Mileage", amount: 450, entryType: "charge", source: "system", systemKey: "extra_mileage", status: "unpaid" },
+    { title: "Fuel refill", amount: 24, entryType: "charge", source: "manual", status: "paid", taxAmount: 1.2, totalAmount: 25.2 },
+    { title: "Overspeeding", amount: 350, entryType: "charge", source: "manual", status: "unpaid", paidVia: "e_transfer", taxAmount: 17.5, totalAmount: 367.5 },
+    { title: "Pull over", amount: 190, entryType: "charge", source: "manual", status: "paid", paidVia: "deposit", taxAmount: 9.5, totalAmount: 199.5 },
+    { title: "Check-In Payment", amount: 376.95, entryType: "payment", source: "manual", status: "paid" },
+    { title: "Check-Out Payment", amount: 497.7, entryType: "payment", source: "manual", status: "paid" },
+  ],
+};
+const overspeedInvoice = resolveFullInvoiceScope(overspeedBooking, { car: { category: "suv" } });
+assert(overspeedInvoice.totalAmount === 1441.65, "overspeed booking full invoice total is 1441.65");
+assert(overspeedInvoice.paymentReceived === 1074.15, "overspeed booking does not credit checkout fuel again");
+assert(overspeedInvoice.amountDue === 367.5, "overspeed booking balance is only the unpaid e-transfer");
+assert(
+  JSON.stringify(overspeedInvoice.paymentNotes) ===
+    JSON.stringify([
+      "Paid at check-in: $376.95",
+      "Paid at check-out: $497.70",
+      "Paid from deposit: $199.50",
+      "Total paid: $1074.15",
+      "Balance due (e-transfer): $367.50",
+    ]),
+  "full invoice footer breaks paid amounts down by source",
+);
 
 const party = {
   bookingRef: `#${getBookingPublicNumber(booking)}`,
@@ -350,6 +387,25 @@ const rentalText = invoicePlainText(rentalDocx);
 const checkInText = invoicePlainText(checkInDocx);
 const checkOutText = invoicePlainText(checkOutDocx);
 const postText = invoicePlainText(postDocx);
+const fullText = invoicePlainText(fullDocx);
+assert(fullText.includes("Paid at check-in"), "full invoice lists check-in payment");
+assert(fullText.includes("Paid at check-out"), "full invoice lists check-out payment");
+assert(fullText.includes("Total paid"), "full invoice lists total paid");
+const subtotalAt = fullText.indexOf("Subtotal");
+const gstAt = fullText.indexOf("GST");
+const totalAt = fullText.indexOf("TOTAL");
+const paidAt = fullText.indexOf("Paid at check-in");
+const balanceAt = fullText.indexOf("Balance due");
+assert(subtotalAt >= 0 && subtotalAt < gstAt, "GST comes after Subtotal");
+assert(gstAt < totalAt, "TOTAL comes after GST");
+assert(totalAt < paidAt, "payments come after TOTAL");
+assert(paidAt < balanceAt, "Balance due is the last summary line");
+assert(!fullText.includes("This invoice paid"), "full invoice no longer uses a single paid lump sum");
+assert(!fullText.includes("Payment status"), "full invoice does not repeat payment status");
+const fullXml = new PizZip(fullDocx).file("word/document.xml").asText();
+assert(fullXml.includes("157A3A"), "full invoice paints paid amounts green");
+assert(fullXml.includes("B42318"), "full invoice paints unpaid amounts red");
+assert(fullXml.includes("w:jc w:val=\"right\""), "full invoice keeps payment amounts right-aligned");
 
 assert(rentalText.includes("TOTAL"), "invoice total label is TOTAL");
 assert(!/TOTAL\s*DUE/i.test(rentalText), "invoice no longer says TOTAL DUE");
@@ -365,7 +421,7 @@ assert(postText.includes("Traffic challan"), "charge invoice has only that charg
 assert(!postText.includes("Fuel refill"), "charge invoice excludes other charges");
 assert(checkInText.includes("2DD5249A-3"), "check-in invoice number is in the template");
 assert(checkInText.includes("Child Seat"), "check-in invoice includes services");
-assert(/Paid:/.test(checkInText), "check-in invoice shows amount paid");
+assert(checkInText.includes("Paid"), "check-in invoice shows amount paid");
 assert(!checkInText.includes("Paid at check-in"), "check-in invoice does not list payment as a table row");
 assert(checkInText.includes("Balance due"), "check-in invoice shows remaining due");
 assert(!checkInText.includes("This invoice paid"), "check-in invoice does not use payment-only wording");
@@ -440,8 +496,7 @@ const odometerValues = invoiceOdometerValues(checkInDocx);
 assert(odometerValues[0] === "131330", "odometer out value stays in the first column");
 assert(odometerValues[1] === "Full Tank", "fuel out value sits beside odometer out");
 assert(checkOut.paymentNotes.some((note) => /Paid at check-out/i.test(note)), "check-out invoice footer notes the check-out payment");
-assert(checkOutText.includes("Paid at check-out"), "check-out invoice footer lists the check-out payment");
-assert(/Paid:/.test(checkOutText), "check-out invoice shows amount paid");
+assert(checkOutText.includes("Paid"), "check-out invoice shows amount paid");
 assert(checkOutText.includes("Balance due"), "check-out invoice shows remaining due");
 assert(checkOutText.includes("Extra Mileage"), "check-out invoice includes extra KM");
 assert(checkOutText.includes("Fuel refill"), "check-out invoice includes checkout charges");

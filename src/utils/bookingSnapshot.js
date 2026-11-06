@@ -1,8 +1,8 @@
-import { AdditionalService } from "../models/additionalService.model.js";
 import { calculateRentalDays, isValidRentalPeriod, calculateGrandTotal } from "./rentalPricing.js";
 import { calculateServiceCharge } from "./serviceCharge.js";
 import { buildServiceQuantityMap } from "./serviceQuantity.js";
 import { isExtraDriverService } from "./extraDriver.js";
+import { loadServicesByIds } from "./loadServices.js";
 
 /** @param {import("../models/booking.model.js").Booking | Record<string, unknown>} booking */
 export function hasPricingSnapshot(booking) {
@@ -28,9 +28,10 @@ export async function buildServiceSnapshots(
   serviceQuantities = [],
   legacyExtraDriverCount,
 ) {
+  const { byId } = await loadServicesByIds(additionalServiceIds);
   let extraDriverServiceId = null;
   for (const svcId of additionalServiceIds) {
-    const svc = await AdditionalService.findById(svcId);
+    const svc = byId.get(String(svcId));
     if (svc && isExtraDriverService(svc)) {
       extraDriverServiceId = String(svc._id);
       break;
@@ -47,7 +48,7 @@ export async function buildServiceSnapshots(
   const snapshots = [];
 
   for (const svcId of additionalServiceIds) {
-    const svc = await AdditionalService.findById(svcId);
+    const svc = byId.get(String(svcId));
     if (!svc) continue;
 
     snapshots.push({
@@ -89,11 +90,13 @@ export function formatServiceSnapshotsForDetail(snapshots) {
  * Legacy fallback: build detail services from live catalog.
  */
 export async function buildLiveServiceDetailList(booking) {
+  const ids = booking.additionalServiceIds ?? [];
+  const { byId } = await loadServicesByIds(ids);
   const services = [];
   let extraDriverServiceId = null;
 
-  for (const svcId of booking.additionalServiceIds ?? []) {
-    const svc = await AdditionalService.findById(svcId);
+  for (const svcId of ids) {
+    const svc = byId.get(String(svcId));
     if (svc) {
       if (isExtraDriverService(svc)) extraDriverServiceId = String(svc._id);
       services.push(svc);

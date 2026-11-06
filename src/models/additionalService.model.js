@@ -22,4 +22,7 @@ const additionalServiceSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+additionalServiceSchema.index({ isActive: 1 });
+additionalServiceSchema.index({ category: 1, isActive: 1 });
+
 export const AdditionalService = mongoose.model("AdditionalService", additionalServiceSchema);

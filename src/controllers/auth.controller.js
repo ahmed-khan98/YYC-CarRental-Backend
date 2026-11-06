@@ -4,6 +4,7 @@ import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { formatDoc } from "../utils/formatDoc.js";
+import { assertValidEmail } from "../utils/email.js";
 
 const ADMIN_EMAIL = "ahmedkhn015@gmail.com";
 const ADMIN_DISPLAY_NAME = "Admin";
@@ -31,6 +32,7 @@ const register = asyncHandler(async (req, res) => {
   if (!email || !password) {
     throw new ApiError(400, "Email and password are required");
   }
+  assertValidEmail(email);
 
   const existing = await User.findOne({ email: email.toLowerCase() });
   if (existing) {
@@ -52,6 +54,7 @@ const login = asyncHandler(async (req, res) => {
   if (!email || !password) {
     throw new ApiError(400, "Email and password are required");
   }
+  assertValidEmail(email);
 
   const user = await User.findOne({ email: email.toLowerCase() }).select("+password");
   if (!user || !(await user.comparePassword(password))) {

@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { ApiError } from "./ApiError.js";
+import { logger } from "./logger.js";
 import {
   isDuplicateKeyError,
   messageFromDuplicateKeyError,
@@ -19,7 +20,7 @@ function sendError(res, statusCode, message, errors = []) {
 }
 
 function logClientError(message) {
-  console.warn(message);
+  logger.warn(message);
 }
 
 const ErrorHandler = (err, req, res, next) => {
@@ -30,7 +31,7 @@ const ErrorHandler = (err, req, res, next) => {
 
   if (err instanceof ApiError) {
     if (err.statusCode >= 500) {
-      console.error(err);
+      logger.error(err);
     } else {
       logClientError(err.message);
     }
@@ -65,7 +66,7 @@ const ErrorHandler = (err, req, res, next) => {
     return;
   }
 
-  console.error(err);
+  logger.error(err);
   sendError(res, 500, "Internal Server Error");
 };
 

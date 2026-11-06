@@ -7,8 +7,9 @@ import { isStaff } from "../middlewares/auth.middleware.js";
 import { ApiError } from "../utils/ApiError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
-import { aggregatePaginate, paginatedPayload, wantsPagination } from "../utils/paginate.js";
+import { aggregatePaginate, paginatedPayload, paginationOptions, wantsPagination } from "../utils/paginate.js";
 import { formatDoc } from "../utils/formatDoc.js";
+import { logger } from "../utils/logger.js";
 import {
   bookingCarPopulate,
   enrichPopulatedCar,
@@ -31,6 +32,7 @@ import {
 } from "../utils/checkInAgreementPdf.js";
 import { calculateRentalDays } from "../utils/rentalPricing.js";
 import { calculateExtraMileageBilling } from "../utils/extraMileage.js";
+import { bookingHasUnlimitedMileage } from "../utils/unlimitedMileage.js";
 import {
   resolveBookedChargePerExtraKm,
   resolveBookedDailyMileageLimit,
@@ -58,7 +60,7 @@ import {
 } from "../utils/billing.js";
 import {
   applySecurityDepositOnCheckIn,
-  SECURITY_DEPOSIT_AMOUNT,
+  resolveBookingPreAuthorizedAmount,
 } from "../utils/securityDeposit.js";
 import {
   attachInvoiceToBillEntry,
@@ -75,16 +77,16 @@ async function loadAgreementPdfContext(
   issuedAt,
   options = {},
 ) {
-  const booking = await Booking.findById(bookingId);
+  const booking = await Booking.findById(bookingId).lean();
   if (!booking) {
     throw new ApiError(404, "Booking not found");
   }
 
   const [car, customer, pickupLocation, dropoffLocation] = await Promise.all([
     findCarIncludingDeactivated(booking.carId),
-    User.findById(booking.userId),
-    Location.findById(booking.pickupLocationId),
-    Location.findById(booking.dropoffLocationId),
+    User.findById(booking.userId).lean(),
+    Location.findById(booking.pickupLocationId).lean(),
+    Location.findById(booking.dropoffLocationId).lean(),
   ]);
 
   return buildAgreementContext({
@@ -108,6 +110,44 @@ function sendPdf(res, pdfBuffer, filename) {
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
   return res.send(pdfBuffer);
+}
+
+async function loadSignatureBuffer(url, inspection) {
+  if (!url) {
+    logger.warn(
+      `Agreement PDF: no signatureImageUrl for inspection ${inspection?._id || "unknown"}; continuing without signature`,
+    );
+    return null;
+  }
+  try {
+    const buffer = await readStoredFile(url);
+    if (!buffer) {
+      logger.warn(
+        `Agreement PDF: could not load signature for inspection ${inspection?._id || "unknown"}; continuing without signature`,
+      );
+      return null;
+    }
+    return buffer;
+  } catch (err) {
+    logger.warn(
+      `Agreement PDF: signature load failed for inspection ${inspection?._id || "unknown"}; continuing without signature: ${err?.message || err}`,
+    );
+    return null;
+  }
+}
+
+async function persistSignedPdf(inspection, pdfBuffer, folder) {
+  try {
+    const pdfUpload = await uploadPdfToStorage(pdfBuffer, folder);
+    inspection.signedPdfUrl = pdfUpload.secure_url;
+    await inspection.save();
+  } catch (err) {
+    logger.error(
+      `Agreement PDF: failed to persist signed PDF for inspection ${inspection?._id || "unknown"}:`,
+      err?.message || err,
+    );
+  }
+  return pdfBuffer;
 }
 
 function checkInPaymentSnapshot(inspection, booking) {
@@ -164,14 +204,10 @@ export async function generateAndStoreCheckInAgreement(inspectionId) {
     return { inspection: null, booking: null, pdfBuffer: null };
   }
 
-  const booking = await Booking.findById(inspection.bookingId);
+  const booking = await Booking.findById(inspection.bookingId).lean();
   if (!booking) {
     return { inspection, booking: null, pdfBuffer: null };
   }
-  if (!inspection.signatureImageUrl) {
-    throw new Error("Check-in signature image is missing");
-  }
-
   const context = await loadAgreementPdfContext(
     inspection.bookingId,
     checkInDraftFromInspection(inspection),
@@ -184,11 +220,7 @@ export async function generateAndStoreCheckInAgreement(inspectionId) {
     },
   );
 
-  const signatureBuffer = await readStoredFile(inspection.signatureImageUrl);
-  if (!signatureBuffer) {
-    throw new Error("Failed to load signature image for check-in PDF");
-  }
-
+  const signatureBuffer = await loadSignatureBuffer(inspection.signatureImageUrl, inspection);
   const pdfBuffer = await generateSignedCheckInAgreementPdf(context, signatureBuffer);
   const pdfUpload = await uploadPdfToStorage(pdfBuffer, "check-in-documents");
   inspection.signedPdfUrl = pdfUpload.secure_url;
@@ -207,7 +239,7 @@ function queueCheckInDocuments({ bookingId, inspectionId, previousBillEntries, p
     inspectionId,
     payload: { previousBillEntries, pendingInvoiceEntryIds },
   }).catch((err) => {
-    console.error("Failed to enqueue check-in agreement email:", err?.message || err);
+    logger.error("Failed to enqueue check-in agreement email:", err?.message || err);
   });
 }
 
@@ -218,7 +250,7 @@ function queueCheckOutDocuments({ bookingId, inspectionId, previousBillEntries, 
     inspectionId,
     payload: { previousBillEntries, pendingInvoiceEntryIds },
   }).catch((err) => {
-    console.error("Failed to enqueue check-out invoice email:", err?.message || err);
+    logger.error("Failed to enqueue check-out invoice email:", err?.message || err);
   });
 }
 
@@ -227,18 +259,11 @@ export async function generateSavedCheckoutAgreementPdf(checkOutInspection) {
   const checkIn = await VehicleInspection.findOne({
     bookingId: checkOutInspection.bookingId,
     type: "check_in",
-  });
+  }).lean();
   if (!checkIn) {
     throw new ApiError(404, "Check-in inspection not found");
   }
-  if (!checkIn.signatureImageUrl) {
-    throw new ApiError(400, "Check-in signature is required to generate the check-out PDF");
-  }
-
-  const signatureBuffer = await readStoredFile(checkIn.signatureImageUrl);
-  if (!signatureBuffer) {
-    throw new ApiError(500, "Failed to load check-in signature for the check-out PDF");
-  }
+  const signatureBuffer = await loadSignatureBuffer(checkIn.signatureImageUrl, checkIn);
 
   const context = await loadAgreementPdfContext(
     checkOutInspection.bookingId,
@@ -275,7 +300,7 @@ const getCheckInTermsPdf = asyncHandler(async (req, res) => {
     const checkIn = await VehicleInspection.findOne({
       bookingId: req.params.bookingId,
       type: "check_in",
-    });
+    }).lean();
     if (!checkIn) {
       throw new ApiError(400, "Check-in is required before generating the check-out PDF");
     }
@@ -313,7 +338,7 @@ const getSignedCheckInPdf = asyncHandler(async (req, res) => {
     throw new ApiError(404, "Signed agreement PDF not found");
   }
 
-  const booking = await Booking.findById(inspection.bookingId);
+  const booking = await Booking.findById(inspection.bookingId).lean();
   if (!booking) {
     throw new ApiError(404, "Booking not found");
   }
@@ -337,12 +362,10 @@ const getSignedCheckInPdf = asyncHandler(async (req, res) => {
     if (storedPdf) {
       return sendPdf(res, storedPdf, filename);
     }
+    throw new ApiError(404, "Signed agreement PDF not found");
   }
 
   if (inspection.type === "check_in") {
-    if (!inspection.signatureImageUrl) {
-      throw new ApiError(404, "Signature not found for this agreement");
-    }
     const context = await loadAgreementPdfContext(
       inspection.bookingId,
       checkInDraftFromInspection(inspection),
@@ -354,27 +377,17 @@ const getSignedCheckInPdf = asyncHandler(async (req, res) => {
         paymentCutoffAt: inspection.createdAt ?? inspection._creationTime,
       },
     );
-    const signatureBuffer = await readStoredFile(inspection.signatureImageUrl);
-    if (!signatureBuffer) {
-      throw new ApiError(500, "Failed to load signature image");
-    }
+    const signatureBuffer = await loadSignatureBuffer(inspection.signatureImageUrl, inspection);
     if (inspection.paidAmountAtCheckIn == null) {
       inspection.paidAmountAtCheckIn = checkInPaymentSnapshot(inspection, booking);
-      await inspection.save();
     }
-    return sendPdf(
-      res,
-      await generateSignedCheckInAgreementPdf(context, signatureBuffer),
-      filename,
-    );
+    const pdfBuffer = await generateSignedCheckInAgreementPdf(context, signatureBuffer);
+    await persistSignedPdf(inspection, pdfBuffer, "check-in-documents");
+    return sendPdf(res, pdfBuffer, filename);
   }
 
   const pdfBuffer = await generateSavedCheckoutAgreementPdf(inspection);
-  if (!inspection.signedPdfUrl) {
-    const pdfUpload = await uploadPdfToStorage(pdfBuffer, "check-out-documents");
-    inspection.signedPdfUrl = pdfUpload.secure_url;
-    await inspection.save();
-  }
+  await persistSignedPdf(inspection, pdfBuffer, "check-out-documents");
   return sendPdf(res, pdfBuffer, filename);
 });
 
@@ -410,21 +423,24 @@ const createInspection = asyncHandler(async (req, res) => {
   let paidAmountAtCheckIn;
   let normalizedExtraDrivers;
   let normalizedMainDriver;
+  let securityDepositAmount;
 
   if (type === "check_in") {
-    const mainDriverError = validateMainDriverCheckInDetails(mainDriver);
+    const booking = await Booking.findById(bookingId).lean();
+    if (!booking) throw new ApiError(404, "Booking not found");
+    securityDepositAmount = resolveBookingPreAuthorizedAmount(booking);
+
+    const mainDriverError = validateMainDriverCheckInDetails(mainDriver, booking.returnDate);
     if (mainDriverError) {
       throw new ApiError(400, mainDriverError);
     }
     normalizedMainDriver = normalizeMainDriverCheckInDetails(mainDriver);
 
-    const booking = await Booking.findById(bookingId);
-    if (!booking) throw new ApiError(404, "Booking not found");
-
     const expectedDriverCount = resolveBookingExtraDriverCount(booking);
     const driverValidationError = validateExtraDriverCheckInDetails(
       expectedDriverCount,
       extraDrivers,
+      booking.returnDate,
     );
     if (driverValidationError) {
       throw new ApiError(400, driverValidationError);
@@ -459,7 +475,7 @@ const createInspection = asyncHandler(async (req, res) => {
       $or: [{ signedPdfUrl: { $exists: false } }, { signedPdfUrl: null }, { signedPdfUrl: "" }],
     });
 
-    const checkIn = await VehicleInspection.findOne({ bookingId, type: "check_in" });
+    const checkIn = await VehicleInspection.findOne({ bookingId, type: "check_in" }).lean();
     if (!checkIn) {
       throw new ApiError(400, "Check-in inspection is required before check-out");
     }
@@ -487,7 +503,7 @@ const createInspection = asyncHandler(async (req, res) => {
     imageUrls: storedImageUrls,
     signatureImageUrl,
     ...(type === "check_in" && paidAmountAtCheckIn != null ? { paidAmountAtCheckIn } : {}),
-    ...(type === "check_in" ? { securityDepositAmount: SECURITY_DEPOSIT_AMOUNT } : {}),
+    ...(type === "check_in" ? { securityDepositAmount } : {}),
     conductedBy: req.user._id,
     ...performedByFields(req.user),
     ...(normalizedMainDriver ? { mainDriver: normalizedMainDriver } : {}),
@@ -505,7 +521,7 @@ const createInspection = asyncHandler(async (req, res) => {
     const car = await findCarIncludingDeactivated(carId);
     if (!car) throw new ApiError(404, "Car not found");
 
-    const checkIn = await VehicleInspection.findOne({ bookingId, type: "check_in" });
+    const checkIn = await VehicleInspection.findOne({ bookingId, type: "check_in" }).lean();
     if (!checkIn) {
       throw new ApiError(400, "Check-in inspection is required before check-out");
     }
@@ -520,11 +536,14 @@ const createInspection = asyncHandler(async (req, res) => {
       booking.returnDate,
       booking.returnTime,
     );
+    const hasUnlimitedMileage = await bookingHasUnlimitedMileage(booking);
 
     mileageBilling = calculateExtraMileageBilling({
       checkInMileage: checkIn.mileage,
       checkOutMileage: Number(mileage),
-      dailyMileageLimit: resolveBookedDailyMileageLimit(booking, car),
+      dailyMileageLimit: hasUnlimitedMileage
+        ? null
+        : resolveBookedDailyMileageLimit(booking, car),
       chargePerExtraKm: resolveBookedChargePerExtraKm(booking, car),
       rentalDays,
     });
@@ -662,7 +681,7 @@ const createInspection = asyncHandler(async (req, res) => {
 });
 
 const listInspectionsByBooking = asyncHandler(async (req, res) => {
-  const booking = await Booking.findById(req.params.bookingId);
+  const booking = await Booking.findById(req.params.bookingId).lean();
   if (!booking) {
     throw new ApiError(404, "Booking not found");
   }
@@ -672,7 +691,7 @@ const listInspectionsByBooking = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Forbidden");
   }
 
-  const inspections = await VehicleInspection.find({ bookingId: req.params.bookingId });
+  const inspections = await VehicleInspection.find({ bookingId: req.params.bookingId }).lean();
   const visibleInspections = staff
     ? inspections
     : inspections.filter((insp) => {
@@ -689,7 +708,7 @@ const listInspectionsByCar = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Forbidden");
   }
 
-  const inspections = await VehicleInspection.find({ carId: req.params.carId });
+  const inspections = await VehicleInspection.find({ carId: req.params.carId }).lean();
   return res.status(200).json(new ApiResponse(200, await formatInspections(inspections), "Inspections fetched"));
 });
 
@@ -736,28 +755,16 @@ const CHECKINOUT_BOOKING_POPULATE = [
   { path: "dropoffLocationId", select: CHECKINOUT_LOCATION_FIELDS },
 ];
 
-const listCheckInOutBoard = asyncHandler(async (req, res) => {
-  if (!isStaff(req.user)) {
-    throw new ApiError(403, "Forbidden");
-  }
-
-  const [activeBookings, completedBookings] = await Promise.all([
-    Booking.find({ status: { $in: ["confirmed", "checked_in"] } })
-      .sort({ createdAt: -1 })
-      .populate(CHECKINOUT_BOOKING_POPULATE),
-    Booking.find({ status: "completed" })
-      .sort({ createdAt: -1 })
-      .limit(10)
-      .populate(CHECKINOUT_BOOKING_POPULATE),
-  ]);
-  const bookings = [...activeBookings, ...completedBookings];
+async function formatCheckInOutBookings(bookings) {
   await ensureBookingCars(bookings);
   const bookingIds = bookings.map((booking) => booking._id);
-
-  const inspections = await VehicleInspection.find({ bookingId: { $in: bookingIds } })
-    .sort({ createdAt: -1 })
-    .populate("conductedBy", CHECKINOUT_ADMIN_FIELDS)
-    .populate("performedByUserId", CHECKINOUT_ADMIN_FIELDS);
+  const inspections = bookingIds.length
+    ? await VehicleInspection.find({ bookingId: { $in: bookingIds } })
+      .sort({ createdAt: -1 })
+      .populate("conductedBy", CHECKINOUT_ADMIN_FIELDS)
+      .populate("performedByUserId", CHECKINOUT_ADMIN_FIELDS)
+      .lean()
+    : [];
 
   const formatted = await formatInspections(inspections);
   const latestByKey = new Map();
@@ -770,7 +777,7 @@ const listCheckInOutBoard = asyncHandler(async (req, res) => {
     }
   }
 
-  const items = bookings.map((booking) => {
+  return bookings.map((booking) => {
     const id = booking._id.toString();
     return formatCheckInOutBooking(
       booking,
@@ -778,6 +785,59 @@ const listCheckInOutBoard = asyncHandler(async (req, res) => {
       latestByKey.get(`${id}:check_out`),
     );
   });
+}
+
+const listCheckInOutBoard = asyncHandler(async (req, res) => {
+  if (!isStaff(req.user)) {
+    throw new ApiError(403, "Forbidden");
+  }
+
+  if (req.query.status != null) {
+    const allowedStatuses = ["confirmed", "checked_in", "completed"];
+    const status = String(req.query.status);
+    if (!allowedStatuses.includes(status)) {
+      throw new ApiError(400, "Invalid check-in/out status");
+    }
+
+    const { page, limit } = paginationOptions(req, { defaultLimit: 20 });
+    const filter = { status };
+    const [total, bookings] = await Promise.all([
+      Booking.countDocuments(filter),
+      Booking.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate(CHECKINOUT_BOOKING_POPULATE),
+    ]);
+    const items = await formatCheckInOutBookings(bookings);
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    return res.status(200).json(new ApiResponse(200, {
+      items,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+        nextPage: page < totalPages ? page + 1 : null,
+        prevPage: page > 1 ? page - 1 : null,
+      },
+    }, "Check-in/out board fetched"));
+  }
+
+  const [activeBookings, completedBookings] = await Promise.all([
+    Booking.find({ status: { $in: ["confirmed", "checked_in"] } })
+      .sort({ createdAt: -1 })
+      .populate(CHECKINOUT_BOOKING_POPULATE),
+    Booking.find({ status: "completed" })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .populate(CHECKINOUT_BOOKING_POPULATE),
+  ]);
+  const bookings = [...activeBookings, ...completedBookings];
+  const items = await formatCheckInOutBookings(bookings);
 
   return res.status(200).json(new ApiResponse(200, items, "Check-in/out board fetched"));
 });

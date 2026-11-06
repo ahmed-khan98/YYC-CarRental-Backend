@@ -1,4 +1,5 @@
 import { EmailJob } from "../models/emailJob.model.js";
+import { logger } from "./logger.js";
 
 const RETRY_DELAYS_MS = [
   60_000,
@@ -141,7 +142,7 @@ export async function recoverStuckEmailJobs(now = new Date()) {
     { $set: { status: "pending", nextRetryAt: now }, $unset: { lockedAt: 1 } },
   );
   if (result.modifiedCount) {
-    console.warn("Email job worker requeued stuck jobs:", result.modifiedCount);
+    logger.warn("Email job worker requeued stuck jobs:", result.modifiedCount);
   }
 }
 
@@ -181,7 +182,7 @@ export async function markEmailJobFailure(job, err, { permanent = false } = {}) 
 
   if (giveUp) {
     job.status = "failed";
-    console.error("Email job failed permanently:", {
+    logger.error("Email job failed permanently:", {
       id: String(job._id),
       type: job.type,
       bookingId: String(job.bookingId),
@@ -191,7 +192,7 @@ export async function markEmailJobFailure(job, err, { permanent = false } = {}) 
   } else {
     job.status = "pending";
     job.nextRetryAt = new Date(Date.now() + nextRetryDelayMs(attempts));
-    console.warn("Email job retry scheduled:", {
+    logger.warn("Email job retry scheduled:", {
       id: String(job._id),
       type: job.type,
       bookingId: String(job.bookingId),

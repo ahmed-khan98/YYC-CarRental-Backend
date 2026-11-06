@@ -18,4 +18,7 @@ const maintenanceSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+maintenanceSchema.index({ carId: 1, createdAt: -1 });
+maintenanceSchema.index({ status: 1, createdAt: -1 });
+
 export const Maintenance = mongoose.model("Maintenance", maintenanceSchema);
