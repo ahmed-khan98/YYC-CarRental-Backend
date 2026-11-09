@@ -32,6 +32,8 @@ const ErrorHandler = (err, req, res, next) => {
   if (err instanceof ApiError) {
     if (err.statusCode >= 500) {
       logger.error(err);
+    } else if (err.statusCode === 404) {
+      logClientError(`${req.method} ${req.originalUrl} — ${err.message}`);
     } else {
       logClientError(err.message);
     }
