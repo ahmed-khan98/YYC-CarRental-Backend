@@ -1,11 +1,20 @@
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * MS_PER_HOUR;
 
-/** Combine a date value with an HH:mm time string (local calendar day). */
+function bookingYmd(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(String(value ?? "").trim());
+  return match ? match[1] : "";
+}
+
+/** Combine stored YYYY-MM-DD + HH:mm as a calendar datetime. No timezone conversion. */
 export function combineDateAndTime(dateInput, timeStr = "00:00") {
-  const date = new Date(dateInput);
-  const [hours, minutes] = timeStr.split(":").map(Number);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), hours, minutes ?? 0, 0, 0);
+  const ymd = bookingYmd(dateInput);
+  const [year, month, day] = (ymd || "1970-01-01").split("-").map(Number);
+  const [hours, minutes] = String(timeStr).split(":").map(Number);
+  return new Date(year, month - 1, day, hours || 0, minutes ?? 0, 0, 0);
 }
 
 /**

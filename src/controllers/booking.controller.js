@@ -31,7 +31,7 @@ import { formatBookingWithIds, formatListBooking } from "../utils/formatBooking.
 import { pickupDateRangeMatch } from "../utils/pickupDateRange.js";
 import { rentalPeriodsConflictEitherWay } from "../utils/datesOverlap.js";
 import { calculateRentalDays, isValidRentalPeriod } from "../utils/rentalPricing.js";
-import { bookingWindowError } from "../utils/bookingWindow.js";
+import { asBookingYmd, bookingWindowError } from "../utils/bookingWindow.js";
 import { getPreAuthorizedAmount } from "../utils/appConfig.js";
 import { calculateServiceCharge } from "../utils/serviceCharge.js";
 import { patchText } from "../utils/patchPayload.js";
@@ -571,6 +571,12 @@ const createBooking = asyncHandler(async (req, res) => {
     serviceQuantities,
   } = req.body;
 
+  const storedPickupDate = asBookingYmd(pickupDate);
+  const storedReturnDate = asBookingYmd(returnDate);
+  if (!storedPickupDate || !storedReturnDate) {
+    throw new ApiError(400, "Pickup and return dates are required");
+  }
+
   const car = await findCarIncludingDeactivated(carId);
   if (!car) throw new ApiError(404, "Car not found");
   if (isCarDeactivated(car)) throw new ApiError(400, "Car is not available");
@@ -600,9 +606,9 @@ const createBooking = asyncHandler(async (req, res) => {
 
   const conflicting = await findConflictingBooking(
     carId,
-    pickupDate,
+    storedPickupDate,
     pickupTime,
-    returnDate,
+    storedReturnDate,
     returnTime,
   );
 
@@ -610,16 +616,16 @@ const createBooking = asyncHandler(async (req, res) => {
     throw new ApiError(400, USER_AVAILABILITY_ERROR);
   }
 
-  if (!isValidRentalPeriod(pickupDate, pickupTime, returnDate, returnTime)) {
+  if (!isValidRentalPeriod(storedPickupDate, pickupTime, storedReturnDate, returnTime)) {
     throw new ApiError(400, "Return must be after pickup");
   }
-  requireBookingWindow(pickupDate);
+  requireBookingWindow(storedPickupDate);
 
   const { total: totalAmount, ...pricingSnapshot } = await calculateAndSnapshotTotal(
     car,
-    pickupDate,
+    storedPickupDate,
     pickupTime,
-    returnDate,
+    storedReturnDate,
     returnTime,
     additionalServiceIds ?? [],
     storedQuantities,
@@ -631,9 +637,9 @@ const createBooking = asyncHandler(async (req, res) => {
     carId,
     pickupLocationId,
     dropoffLocationId,
-    pickupDate,
+    pickupDate: storedPickupDate,
     pickupTime,
-    returnDate,
+    returnDate: storedReturnDate,
     returnTime,
     status: "confirmed",
     totalAmount,
@@ -680,6 +686,12 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
     notes,
   } = req.body;
 
+  const storedPickupDate = asBookingYmd(pickupDate);
+  const storedReturnDate = asBookingYmd(returnDate);
+  if (!storedPickupDate || !storedReturnDate) {
+    throw new ApiError(400, "Pickup and return dates are required");
+  }
+
   const car = await findCarIncludingDeactivated(carId);
   if (!car) throw new ApiError(404, "Car not found");
   if (isCarDeactivated(car)) throw new ApiError(400, "Car is not available");
@@ -709,25 +721,25 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
 
   const conflicting = await findConflictingBooking(
     carId,
-    pickupDate,
+    storedPickupDate,
     pickupTime,
-    returnDate,
+    storedReturnDate,
     returnTime,
   );
   if (conflicting) {
     throw new ApiError(400, ADMIN_AVAILABILITY_ERROR);
   }
 
-  if (!isValidRentalPeriod(pickupDate, pickupTime, returnDate, returnTime)) {
+  if (!isValidRentalPeriod(storedPickupDate, pickupTime, storedReturnDate, returnTime)) {
     throw new ApiError(400, "Return must be after pickup");
   }
-  requireBookingWindow(pickupDate);
+  requireBookingWindow(storedPickupDate);
 
   const { total: totalAmount, ...pricingSnapshot } = await calculateAndSnapshotTotal(
     car,
-    pickupDate,
+    storedPickupDate,
     pickupTime,
-    returnDate,
+    storedReturnDate,
     returnTime,
     additionalServiceIds ?? [],
     storedQuantities,
@@ -739,9 +751,9 @@ const adminCreateBooking = asyncHandler(async (req, res) => {
     carId,
     pickupLocationId,
     dropoffLocationId,
-    pickupDate,
+    pickupDate: storedPickupDate,
     pickupTime,
-    returnDate,
+    returnDate: storedReturnDate,
     returnTime,
     status: "confirmed",
     totalAmount,
@@ -805,9 +817,9 @@ const adminUpdateBooking = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Car is not available");
   }
 
-  const nextPickupDate = pickupDate ?? booking.pickupDate;
+  const nextPickupDate = asBookingYmd(pickupDate ?? booking.pickupDate) || booking.pickupDate;
   const nextPickupTime = pickupTime ?? booking.pickupTime ?? "10:00";
-  const nextReturnDate = returnDate ?? booking.returnDate;
+  const nextReturnDate = asBookingYmd(returnDate ?? booking.returnDate) || booking.returnDate;
   const nextReturnTime = returnTime ?? booking.returnTime ?? "10:00";
   const nextServiceIds =
     additionalServiceIds !== undefined
@@ -890,9 +902,9 @@ const adminUpdateBooking = asyncHandler(async (req, res) => {
   if (carId) booking.carId = carId;
   if (pickupLocationId) booking.pickupLocationId = pickupLocationId;
   if (dropoffLocationId) booking.dropoffLocationId = dropoffLocationId;
-  if (pickupDate) booking.pickupDate = pickupDate;
+  if (pickupDate) booking.pickupDate = nextPickupDate;
   if (pickupTime !== undefined) booking.pickupTime = pickupTime;
-  if (returnDate) booking.returnDate = returnDate;
+  if (returnDate) booking.returnDate = nextReturnDate;
   if (returnTime !== undefined) booking.returnTime = returnTime;
   if (additionalServiceIds !== undefined) booking.additionalServiceIds = additionalServiceIds;
   if (servicesTouched) {
