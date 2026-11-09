@@ -1398,6 +1398,19 @@ function findParagraphStart(xml, fromPos) {
   return -1;
 }
 
+/** True table row open. `<w:tr` also matches `<w:trPr`, which is the wrong node. */
+function lastTableRowStart(xml, fromPos) {
+  let pos = fromPos;
+  while (pos >= 0) {
+    const idx = xml.lastIndexOf("<w:tr", pos);
+    if (idx < 0) return -1;
+    const ch = xml[idx + 5];
+    if (ch === " " || ch === ">" || ch === "/") return idx;
+    pos = idx - 1;
+  }
+  return -1;
+}
+
 /** Drop leftover renter/rep initials lines from the agreement (all occurrences). */
 function stripRenterInitialParagraphs(xml) {
   let next = xml;
@@ -1565,8 +1578,8 @@ function fillPrintNameLines(xml, name) {
   while (true) {
     const pos = result.indexOf("<w:t>Print Full Name</w:t>", searchFrom);
     if (pos < 0) break;
-    const rowStart = result.lastIndexOf("<w:tr", pos);
-    const prevRowStart = result.lastIndexOf("<w:tr", rowStart - 1);
+    const rowStart = lastTableRowStart(result, pos);
+    const prevRowStart = lastTableRowStart(result, rowStart - 1);
     const prevRowEnd = result.indexOf("</w:tr>", prevRowStart);
     if (prevRowStart < 0 || prevRowEnd < 0 || prevRowStart >= rowStart) {
       searchFrom = pos + 20;
@@ -1589,8 +1602,8 @@ function fillSignedDateLine(xml, signedDate) {
   if (!signedDate?.trim()) return xml;
   const pos = xml.indexOf("<w:t>Date</w:t>");
   if (pos < 0) return xml;
-  const rowStart = xml.lastIndexOf("<w:tr", pos);
-  const prevRowStart = xml.lastIndexOf("<w:tr", rowStart - 1);
+  const rowStart = lastTableRowStart(xml, pos);
+  const prevRowStart = lastTableRowStart(xml, rowStart - 1);
   const prevRowEnd = xml.indexOf("</w:tr>", prevRowStart);
   if (rowStart < 0 || prevRowStart < 0 || prevRowEnd < 0 || prevRowStart >= rowStart) {
     return xml;
@@ -1604,6 +1617,108 @@ function fillSignedDateLine(xml, signedDate) {
 async function loadFilledDocx(context) {
   const templateBuffer = await fs.readFile(TEMPLATE_PATH);
   return fillAgreementDocx(templateBuffer, context);
+}
+
+function pngPixelSize(pngBuffer) {
+  if (!pngBuffer || pngBuffer.length < 24) return { width: 320, height: 80 };
+  if (pngBuffer.toString("ascii", 1, 4) !== "PNG") return { width: 320, height: 80 };
+  return {
+    width: pngBuffer.readUInt32BE(16) || 320,
+    height: pngBuffer.readUInt32BE(20) || 80,
+  };
+}
+
+function signatureDrawingXml(relId, docPrId, pngBuffer) {
+  const EMU = 914400;
+  const { width, height } = pngPixelSize(pngBuffer);
+  const aspect = width / Math.max(1, height);
+  const maxW = Math.round(2.55 * EMU);
+  const maxH = Math.round(0.52 * EMU);
+  let cx = maxW;
+  let cy = Math.round(cx / aspect);
+  if (cy > maxH) {
+    cy = maxH;
+    cx = Math.round(cy * aspect);
+  }
+  return (
+    `<w:p>` +
+    `<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>` +
+    `<w:jc w:val="left"/></w:pPr>` +
+    `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+    `<wp:extent cx="${cx}" cy="${cy}"/>` +
+    `<wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+    `<wp:docPr id="${docPrId}" name="RenterSignature${docPrId}"/>` +
+    `<wp:cNvGraphicFramePr>` +
+    `<a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/>` +
+    `</wp:cNvGraphicFramePr>` +
+    `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+    `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<pic:nvPicPr><pic:cNvPr id="0" name="renter-signature.png"/><pic:cNvPicPr/></pic:nvPicPr>` +
+    `<pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+    `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`
+  );
+}
+
+function embedRenterSignatureInDocx(docxBuffer, pngBuffer) {
+  if (!pngBuffer?.length) return { buffer: docxBuffer, embedded: false };
+
+  const zip = new PizZip(docxBuffer);
+  zip.file("word/media/renter-signature.png", pngBuffer);
+
+  let contentTypes = zip.file("[Content_Types].xml").asText();
+  if (!/Extension="png"/i.test(contentTypes)) {
+    contentTypes = contentTypes.replace(
+      "</Types>",
+      `<Default Extension="png" ContentType="image/png"/></Types>`,
+    );
+    zip.file("[Content_Types].xml", contentTypes);
+  }
+
+  const relId = "rIdRenterSig";
+  let rels = zip.file("word/_rels/document.xml.rels").asText();
+  if (!rels.includes(relId)) {
+    rels = rels.replace(
+      "</Relationships>",
+      `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/renter-signature.png"/></Relationships>`,
+    );
+    zip.file("word/_rels/document.xml.rels", rels);
+  }
+
+  let xml = zip.file("word/document.xml").asText();
+  let count = 0;
+  let searchFrom = 0;
+  while (count < 4) {
+    const pos = xml.indexOf("<w:t>Renter Signature</w:t>", searchFrom);
+    if (pos < 0) break;
+    const rowStart = lastTableRowStart(xml, pos);
+    const prevRowStart = lastTableRowStart(xml, rowStart - 1);
+    const prevRowEnd = xml.indexOf("</w:tr>", prevRowStart);
+    if (rowStart < 0 || prevRowStart < 0 || prevRowEnd < 0 || prevRowStart >= rowStart) {
+      searchFrom = pos + 16;
+      continue;
+    }
+    const prevRow = xml.slice(prevRowStart, prevRowEnd + 7);
+    const pStart = prevRow.indexOf("<w:p");
+    const pEnd = prevRow.indexOf("</w:p>", pStart);
+    if (pStart < 0 || pEnd < 0) {
+      searchFrom = pos + 16;
+      continue;
+    }
+    const drawing = signatureDrawingXml(relId, 1100 + count, pngBuffer);
+    const updatedRow = prevRow.slice(0, pStart) + drawing + prevRow.slice(pEnd + 6);
+    xml = xml.slice(0, prevRowStart) + updatedRow + xml.slice(prevRowEnd + 7);
+    count += 1;
+    searchFrom = pos + 16 + (updatedRow.length - prevRow.length);
+  }
+
+  zip.file("word/document.xml", xml);
+  return {
+    buffer: zip.generate({ type: "nodebuffer" }),
+    embedded: count > 0,
+  };
 }
 
 export async function generateCheckInAgreementPdf(context) {
@@ -1723,9 +1838,31 @@ function lineAboveLabel(hlines, label, { xSlop = 48, yMax = 22 } = {}) {
     .sort((a, b) => a.y - b.y)[0];
 }
 
+function clusteredTextLines(texts, ySlop = 2.5) {
+  const sorted = [...texts].sort((a, b) => b.y - a.y || a.x - b.x);
+  const lines = [];
+  for (const item of sorted) {
+    const line = lines.find((entry) => Math.abs(entry.y - item.y) <= ySlop);
+    if (line) {
+      line.items.push(item);
+      line.y = (line.y * (line.items.length - 1) + item.y) / line.items.length;
+    } else {
+      lines.push({ y: item.y, items: [item] });
+    }
+  }
+  return lines.map((line) => {
+    const items = [...line.items].sort((a, b) => a.x - b.x);
+    return {
+      y: line.y,
+      x: items[0].x,
+      text: items.map((item) => item.text).join("").replace(/\s+/g, " ").trim(),
+    };
+  });
+}
+
 function isRenterSignatureLabel(label, texts) {
   const text = label.text.trim();
-  if (/^Renter Signature$/i.test(text)) return true;
+  if (/^Renter\s*Signature$/i.test(text)) return true;
   if (!/^Renter$/i.test(text)) return false;
   return texts.some(
     (other) =>
@@ -1734,6 +1871,9 @@ function isRenterSignatureLabel(label, texts) {
       other.x > label.x,
   );
 }
+
+/** Signature sits ~47pt above "Print Full Name" on both invoice and final pages. */
+const PRINT_NAME_TO_SIGNATURE_Y = 47;
 
 function signatureBoxFromLabel(pageIndex, label, line, fallback) {
   return {
@@ -1756,23 +1896,39 @@ export function locateAgreementOverlay(pdfDoc) {
     const items = extractPageItems(decodePageContents(pdfDoc, pages[i]));
     const texts = items.filter((item) => item.kind === "text");
     const hlines = items.filter((item) => item.kind === "hline");
+    const lines = clusteredTextLines(texts);
     const pageText = texts.map((item) => item.text).join(" ");
     const isFinalPage = /By signing below/i.test(pageText);
     if (isFinalPage) finalPageIndex = i;
+    const fallback = isFinalPage ? FINAL_SIGNATURE_FIELD : INVOICE_SIGNATURE_FIELD;
 
-    for (const label of texts) {
-      if (isRenterSignatureLabel(label, texts)) {
+    for (const label of [...texts, ...lines]) {
+      if (isRenterSignatureLabel(label, texts) || /^Renter\s*Signature$/i.test(label.text.trim())) {
         const line = lineAboveLabel(hlines, label);
-        const box = signatureBoxFromLabel(
-          i,
-          label,
-          line,
-          isFinalPage ? FINAL_SIGNATURE_FIELD : INVOICE_SIGNATURE_FIELD,
-        );
+        const box = signatureBoxFromLabel(i, label, line, fallback);
         if (isFinalPage) finalBoxes.push(box);
         else invoiceBoxes.push(box);
       }
-      if (isFinalPage && /^Date$/.test(label.text.trim())) {
+    }
+
+    if ((isFinalPage ? finalBoxes : invoiceBoxes).length === 0) {
+      const printName = lines.find((line) => /^Print\s*Full\s*Name$/i.test(line.text));
+      if (printName) {
+        const box = {
+          pageIndex: i,
+          x: printName.x,
+          y: printName.y + PRINT_NAME_TO_SIGNATURE_Y,
+          width: fallback.width,
+          height: fallback.height,
+        };
+        if (isFinalPage) finalBoxes.push(box);
+        else invoiceBoxes.push(box);
+      }
+    }
+
+    if (isFinalPage) {
+      for (const label of [...texts, ...lines]) {
+        if (!/^Date$/.test(label.text.trim())) continue;
         const line = lineAboveLabel(hlines, label, { xSlop: 20 });
         dateFields.push({
           pageIndex: i,
@@ -1785,11 +1941,8 @@ export function locateAgreementOverlay(pdfDoc) {
   }
 
   return {
-    invoice: invoiceBoxes[0] ?? { ...INVOICE_SIGNATURE_FIELD },
-    final: finalBoxes[0] ?? {
-      ...FINAL_SIGNATURE_FIELD,
-      pageIndex: finalPageIndex >= 0 ? finalPageIndex : FINAL_SIGNATURE_FIELD.pageIndex,
-    },
+    invoice: invoiceBoxes[0] ?? null,
+    final: finalBoxes[0] ?? null,
     date: dateFields[0] ?? (
       finalPageIndex >= 0
         ? { ...FINAL_DATE_FIELD, pageIndex: finalPageIndex }
@@ -1841,9 +1994,12 @@ export async function overlaySignatureOnPdf(basePdf, signaturePngBuffer) {
       return Buffer.from(await pdfDoc.save());
     }
     const overlay = locateAgreementOverlay(pdfDoc);
-
-    drawSignature(resolvePage(pdfDoc, overlay.invoice.pageIndex), signatureImage, overlay.invoice);
-    drawSignature(resolvePage(pdfDoc, overlay.final.pageIndex), signatureImage, overlay.final);
+    if (overlay.invoice) {
+      drawSignature(resolvePage(pdfDoc, overlay.invoice.pageIndex), signatureImage, overlay.invoice);
+    }
+    if (overlay.final) {
+      drawSignature(resolvePage(pdfDoc, overlay.final.pageIndex), signatureImage, overlay.final);
+    }
 
     return Buffer.from(await pdfDoc.save());
   } catch {
@@ -1852,7 +2008,10 @@ export async function overlaySignatureOnPdf(basePdf, signaturePngBuffer) {
 }
 
 export async function generateSignedCheckInAgreementPdf(context, signaturePngBuffer) {
-  const basePdf = await generateCheckInAgreementPdf(context);
+  const docxBuffer = await loadFilledDocx(context);
+  const signed = embedRenterSignatureInDocx(docxBuffer, signaturePngBuffer);
+  const basePdf = await convertDocxToPdf(signed.buffer);
+  if (signed.embedded) return basePdf;
   return overlaySignatureOnPdf(basePdf, signaturePngBuffer);
 }
 
