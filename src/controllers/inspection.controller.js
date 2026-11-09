@@ -20,7 +20,6 @@ import { formatInspections } from "../utils/formatInspection.js";
 import {
   uploadToStorage,
   uploadPdfToStorage,
-  fetchStoredPdf,
   readStoredFile,
 } from "../utils/localFileStore.js";
 import {
@@ -356,14 +355,9 @@ const getSignedCheckInPdf = asyncHandler(async (req, res) => {
   }
 
   const filename = `${inspection.type}-${booking._id}.pdf`;
-
   if (inspection.signedPdfUrl) {
-    const storedPdf = await fetchStoredPdf(inspection.signedPdfUrl);
-    if (storedPdf) {
-      return sendPdf(res, storedPdf, filename);
-    }
-    logger.warn(
-      `Signed agreement PDF missing on disk for inspection ${inspection._id}; regenerating`,
+    logger.info(
+      `Regenerating signed agreement PDF for inspection ${inspection._id} so signature follows Renter Signature`,
     );
   }
 
