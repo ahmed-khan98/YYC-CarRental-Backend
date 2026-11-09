@@ -623,7 +623,7 @@ export function buildAgreementContext({
     extraDriverQtyLabel:
       extraDriverFee > 0 ? `${days || 1} × ${extraDriverQty}` : "",
     paidAmount: paidAmount > 0 ? formatMoney(paidAmount) : "",
-    balanceDue: paidAmount > 0 ? formatMoney(invoiceBalanceDue) : "",
+    balanceDue: invoiceBalanceDue > 0 ? formatMoney(invoiceBalanceDue) : "",
     subtotal: formatMoney(invoiceSubtotal),
     taxAmount: formatMoney(invoiceTax),
     totalDue: formatMoney(invoiceTotal),
@@ -758,8 +758,8 @@ export function fillAgreementDocx(templateBuffer, context) {
     context.extraMileageKm,
     context.extraMileageAmount,
   );
-  xml = fillPaidBalanceOnTotal(xml, context.paidAmount, context.balanceDue);
   xml = stripTotalDueReturnNote(xml);
+  xml = insertPaymentSummaryRows(xml, context.paidAmount, context.balanceDue);
   xml = styleInvoiceTableRows(xml);
   xml = stripRenterInitialParagraphs(xml);
     if (context.preExistingDamage) {
@@ -940,6 +940,10 @@ function removeAdditionalDriverFeeRow(xml) {
 
 const INVOICE_ZEBRA_WHITE = "FFFFFF";
 const INVOICE_ZEBRA_GREY = "F2F2F2";
+const INVOICE_PAID_GREEN = "157A3A";
+const INVOICE_DUE_RED = "B42318";
+const INVOICE_PAID_FILL = "F3FBF6";
+const INVOICE_DUE_FILL = "FDECEC";
 const INVOICE_ROW_BORDER_XML =
   `<w:tcBorders>` +
   `<w:top w:val="single" w:sz="8" w:space="0" w:color="C8C8C8"/>` +
@@ -983,7 +987,15 @@ function classifyInvoiceRow(rowXml) {
   const text = invoiceRowPlainText(rowXml);
   if (/Description/.test(text) && /Days\s*\/\s*Qty/.test(text)) return "header";
   if (/SECURITY\s*DEPOSIT/i.test(text)) return "deposit";
-  if (/TOTAL(\s*DUE)?/i.test(text) && !/Total Loss/i.test(text)) return "total";
+  if (/TOTAL(\s*DUE)?/i.test(text) && !/Total paid/i.test(text) && !/Total Loss/i.test(text)) {
+    return "total";
+  }
+  if (
+    /^Paid(\b|$)/.test(text) ||
+    /Paid at |Paid from |Paid by |Total paid|Balance due|Amount due/.test(text)
+  ) {
+    return "payment";
+  }
   if (/Subtotal/.test(text) || /GST\s*\(5%\)/.test(text)) return "summary";
   return "line";
 }
@@ -1056,7 +1068,7 @@ function styleInvoiceTableRows(xml) {
   let lineIndex = 0;
   const styledRows = rows.map((row) => {
     const kind = classifyInvoiceRow(row);
-    if (kind === "header" || kind === "total" || kind === "deposit") {
+    if (kind === "header" || kind === "total" || kind === "deposit" || kind === "payment") {
       return row;
     }
     if (kind === "summary") {
@@ -1083,9 +1095,12 @@ function invoiceTableCell(width, innerXml, { fill = INVOICE_ZEBRA_WHITE } = {}) 
   );
 }
 
-function invoiceCellParagraph(value, { alignRight = false } = {}) {
+function invoiceCellParagraph(value, { alignRight = false, bold = false, color } = {}) {
   const jc = alignRight ? `<w:pPr><w:jc w:val="right"/></w:pPr>` : "";
-  return `<w:p>${jc}<w:r><w:t>${escapeXml(value)}</w:t></w:r></w:p>`;
+  const weight = bold ? `<w:b/><w:bCs/>` : "";
+  const colorXml = color ? `<w:color w:val="${color}"/>` : "";
+  const rPr = weight || colorXml ? `<w:rPr>${weight}${colorXml}</w:rPr>` : "";
+  return `<w:p>${jc}<w:r>${rPr}<w:t>${escapeXml(value)}</w:t></w:r></w:p>`;
 }
 
 function buildInvoiceServiceRow({ name, rate, qtyLabel, amount }) {
@@ -1408,15 +1423,74 @@ function stripRenterInitialParagraphs(xml) {
   return next;
 }
 
-function fillPaidBalanceOnTotal(xml, paidAmount, balanceDue) {
-  if (!paidAmount) return xml;
-  const marker = "<w:t>excl. excess KM — charged at return)</w:t>";
-  const pos = xml.indexOf(marker);
-  if (pos < 0) return xml;
-  const cellEnd = xml.indexOf("</w:tc>", pos);
-  if (cellEnd < 0) return xml;
-  const line = `<w:p><w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t>Paid: $${escapeXml(paidAmount)} · Balance due: $${escapeXml(balanceDue)}</w:t></w:r></w:p>`;
-  return xml.slice(0, cellEnd) + line + xml.slice(cellEnd);
+function paymentSummaryToneStyle(tone) {
+  if (tone === "due") {
+    return { color: INVOICE_DUE_RED, fill: INVOICE_DUE_FILL, bold: true };
+  }
+  return { color: INVOICE_PAID_GREEN, fill: INVOICE_PAID_FILL, bold: false };
+}
+
+function buildPaymentSummaryRow({ label, amount, tone }) {
+  const style = paymentSummaryToneStyle(tone);
+  const labelXml = invoiceCellParagraph(label, {
+    bold: style.bold,
+    color: style.color,
+  });
+  const amountXml = invoiceCellParagraph(`$${amount}`, {
+    alignRight: true,
+    bold: style.bold,
+    color: style.color,
+  });
+  const empty = invoiceCellParagraph("");
+  return (
+    `<w:tr><w:trPr>${INVOICE_ROW_TR_BORDERS_XML}</w:trPr>` +
+    invoiceTableCell(5400, labelXml, { fill: style.fill }) +
+    invoiceTableCell(1680, empty, { fill: style.fill }) +
+    invoiceTableCell(1680, empty, { fill: style.fill }) +
+    invoiceTableCell(1680, amountXml, { fill: style.fill }) +
+    `</w:tr>`
+  );
+}
+
+function agreementPaymentSummaryRows(paidAmount, balanceDue) {
+  const rows = [];
+  if (paidAmount) rows.push({ label: "Paid", amount: paidAmount, tone: "paid" });
+  if (balanceDue) rows.push({ label: "Balance due", amount: balanceDue, tone: "due" });
+  return rows;
+}
+
+function insertPaymentSummaryRows(xml, paidAmount, balanceDue) {
+  const summary = agreementPaymentSummaryRows(paidAmount, balanceDue);
+  if (!summary.length) return xml;
+
+  const marker = "<w:t>Description</w:t>";
+  const descPos = xml.indexOf(marker);
+  if (descPos < 0) return xml;
+  const tableStart = findInvoiceTableStart(xml, descPos);
+  const tableEnd = xml.indexOf("</w:tbl>", descPos);
+  if (tableStart < 0 || tableEnd < 0) return xml;
+
+  const table = xml.slice(tableStart, tableEnd + 8);
+  const firstRow = table.indexOf("<w:tr");
+  if (firstRow < 0) return xml;
+
+  const prefix = table.slice(0, firstRow);
+  const body = table.slice(firstRow, table.lastIndexOf("</w:tbl>"));
+  const rows = [];
+  let cursor = 0;
+  while (cursor < body.length) {
+    const rowStart = body.indexOf("<w:tr", cursor);
+    if (rowStart < 0) break;
+    const rowEnd = body.indexOf("</w:tr>", rowStart);
+    if (rowEnd < 0) break;
+    rows.push(body.slice(rowStart, rowEnd + 7));
+    cursor = rowEnd + 7;
+  }
+
+  const totalIndex = rows.findLastIndex((row) => classifyInvoiceRow(row) === "total");
+  if (totalIndex < 0) return xml;
+  rows.splice(totalIndex + 1, 0, ...summary.map(buildPaymentSummaryRow));
+  return xml.slice(0, tableStart) + prefix + rows.join("") + "</w:tbl>" + xml.slice(tableEnd + 8);
 }
 
 function stripTotalDueReturnNote(xml) {
