@@ -16,11 +16,15 @@ import {
   resolvePhaseBillEntries,
 } from "./billing.js";
 import {
+  entryCreatedAt,
   inferBillEntryPhase,
   isCheckInPaymentEntry,
   isCheckInSystemCharge,
   isCheckOutPaymentEntry,
   isExtraMileageChargeEntry,
+  resolveCheckInAt,
+  resolveCheckoutAt,
+  resolveInvoiceIssuedAt,
 } from "./billPhase.js";
 
 export {
@@ -31,7 +35,9 @@ export {
   isCheckOutPaymentEntry,
   isExtraMileageChargeEntry,
   isPostBookingCharge,
+  resolveCheckInAt,
   resolveCheckoutAt,
+  resolveInvoiceIssuedAt,
 } from "./billPhase.js";
 import { calculateRentalDays, calculateTaxAmount, calculateGrandTotal } from "./rentalPricing.js";
 import { calculateServiceCharge } from "./serviceCharge.js";
@@ -759,7 +765,7 @@ export async function generateFullInvoicePdf(booking) {
     ...context,
     ...scope,
     invoiceNumber: buildFullInvoiceNumber(booking),
-    issuedAt: new Date(),
+    issuedAt: resolveInvoiceIssuedAt(booking, null, "full", context),
   });
 }
 
@@ -778,7 +784,7 @@ export async function generateCheckOutInvoicePdf(booking) {
     ...context,
     ...scope,
     invoiceNumber: resolveCheckOutInvoiceNumber(booking),
-    issuedAt: new Date(),
+    issuedAt: resolveInvoiceIssuedAt(booking, null, "check_out", context),
   });
 }
 
@@ -933,8 +939,10 @@ export async function buildInvoicePartyContext(booking) {
     fuelLevelIn: fuelLabel(checkOut?.fuelLevel),
     car,
     customer,
+    checkIn,
     checkOut,
-    checkoutAt: checkOut?.createdAt ?? null,
+    checkInAt: checkIn?.createdAt ?? checkIn?._creationTime ?? null,
+    checkoutAt: checkOut?.createdAt ?? checkOut?._creationTime ?? null,
   };
 }
 
@@ -945,7 +953,7 @@ export async function generateEntryInvoicePdf(booking, entry) {
     ...context,
     ...scope,
     invoiceNumber: entry.invoiceNumber,
-    issuedAt: entry.createdAt ?? new Date(),
+    issuedAt: resolveInvoiceIssuedAt(booking, entry, scope.kind, context),
   });
 }
 

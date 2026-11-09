@@ -362,7 +362,9 @@ const getSignedCheckInPdf = asyncHandler(async (req, res) => {
     if (storedPdf) {
       return sendPdf(res, storedPdf, filename);
     }
-    throw new ApiError(404, "Signed agreement PDF not found");
+    logger.warn(
+      `Signed agreement PDF missing on disk for inspection ${inspection._id}; regenerating`,
+    );
   }
 
   if (inspection.type === "check_in") {
