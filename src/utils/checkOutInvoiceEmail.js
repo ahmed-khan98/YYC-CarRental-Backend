@@ -1,7 +1,6 @@
 import { User } from "../models/user.model.js";
 import { logger } from "./logger.js";
 import { Car } from "../models/car.model.js";
-import { computeBillSummary } from "./billing.js";
 import { getBookingPublicNumber } from "./billInvoicePdf.js";
 import {
   getSmtpFrom,
@@ -27,41 +26,6 @@ function isValidCustomerEmail(value) {
   return isDeliverableEmailAddress(normalizeEmail(value));
 }
 
-function formatMoney(amount) {
-  const n = Number(amount);
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toFixed(2)}`;
-}
-
-function formatTimeForDisplay(timeStr) {
-  if (!timeStr) return "";
-  const raw = String(timeStr).trim();
-  const h24 = /^(\d{1,2}):(\d{2})$/.exec(raw);
-  if (h24) {
-    const hours = Number(h24[1]);
-    const minutes = h24[2];
-    const period = hours >= 12 ? "PM" : "AM";
-    const hour12 = hours % 12 || 12;
-    return `${hour12}:${minutes} ${period}`;
-  }
-  return raw;
-}
-
-function formatScheduleDate(dateStr, timeStr) {
-  if (!dateStr) return "—";
-  const normalized =
-    dateStr instanceof Date ? dateStr.toISOString().slice(0, 10) : String(dateStr).slice(0, 10);
-  const [y, m, d] = normalized.split("-").map(Number);
-  if (!y || !m || !d) return String(dateStr);
-  const date = new Date(y, m - 1, d);
-  const formatted = date.toLocaleDateString("en-CA", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  return timeStr ? `${formatted} ${formatTimeForDisplay(timeStr)}` : formatted;
-}
-
 function carDisplayName(car) {
   if (!car) return "Vehicle";
   return `${car.year} ${car.make} ${car.model}`.trim();
@@ -79,39 +43,26 @@ export function buildCheckOutInvoiceMailOptions({
   const bookingRef = getBookingPublicNumber(booking);
   const customerName = customer?.name?.trim() || to || "Customer";
   const carName = carDisplayName(car);
-  const pickupWhen = formatScheduleDate(booking.pickupDate, booking.pickupTime);
-  const dropoffWhen = formatScheduleDate(booking.returnDate, booking.returnTime);
-  const totalLabel = formatMoney(
-    computeBillSummary(booking.billEntries ?? []).totalBill ?? booking.totalAmount,
-  );
 
   const text = [
-    "Check-out is complete. Thank you for choosing YYC Car Rental.",
+    `Hi ${customerName},`,
     "",
-    `Booking reference: ${bookingRef}`,
-    `Customer: ${customerName}`,
-    `Car: ${carName}`,
-    `Pickup: ${pickupWhen}`,
-    `Drop-off: ${dropoffWhen}`,
-    `Total amount: ${totalLabel}`,
+    `Thank you for completing the drop off process of ${carName}.`,
     "",
-    "Your check-out invoice is attached as a PDF.",
+    "Please find the attached Invoice containing the trip & charges details.",
     "",
-    "YYC Car Rental",
+    "Note: We will contact you if we receive complaint or ticket during your trip booking.",
+    "",
+    "Best Regards,",
+    "YYC Car Rental.",
   ].join("\n");
 
   const html = `
-    <p>Check-out is complete. Thank you for choosing YYC Car Rental.</p>
-    <p>
-      <strong>Booking reference:</strong> ${escapeHtml(bookingRef)}<br/>
-      <strong>Customer:</strong> ${escapeHtml(customerName)}<br/>
-      <strong>Car:</strong> ${escapeHtml(carName)}<br/>
-      <strong>Pickup:</strong> ${escapeHtml(pickupWhen)}<br/>
-      <strong>Drop-off:</strong> ${escapeHtml(dropoffWhen)}<br/>
-      <strong>Total amount:</strong> ${escapeHtml(totalLabel)}
-    </p>
-    <p>Your check-out invoice is attached as a PDF.</p>
-    <p>YYC Car Rental</p>
+    <p>Hi ${escapeHtml(customerName)},</p>
+    <p>Thank you for completing the drop off process of ${escapeHtml(carName)}.</p>
+    <p>Please find the attached Invoice containing the trip &amp; charges details.</p>
+    <p>Note: We will contact you if we receive complaint or ticket during your trip booking.</p>
+    <p>Best Regards,<br/>YYC Car Rental.</p>
   `;
 
   return {
@@ -124,7 +75,7 @@ export function buildCheckOutInvoiceMailOptions({
     headers: {
       "Reply-To": replyTo,
     },
-    subject: `Check-Out Invoice ${bookingRef} — YYC Car Rental`,
+    subject: `Drop-off Completed – Booking Reference# ${bookingRef}`,
     text,
     html,
     attachments: [

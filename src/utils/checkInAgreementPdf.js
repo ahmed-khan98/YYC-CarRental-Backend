@@ -23,7 +23,7 @@ import { isExtraDriverService, resolveBookingExtraDriverCount } from "./extraDri
 import { calculateServiceCharge } from "./serviceCharge.js";
 import { buildMainDriverCheckInDefaults } from "./mainDriver.js";
 import { convertDocxToPdf } from "./docxToPdf.js";
-import { resolveCheckoutAt } from "./billPhase.js";
+import { isDiscountEntry, resolveCheckoutAt } from "./billPhase.js";
 import { resolvePhaseBillEntries } from "./billing.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -111,6 +111,8 @@ function replaceBlankRunWithBodyText(fragment, value, { last = false } = {}) {
 const SIGNATURE_ABOVE_LINE = 3;
 const SIGNATURE_HEIGHT = 36;
 const SIGNATURE_WIDTH = 210;
+/** Twips. Tall enough for the signature image, short enough to stay in the underline cell. */
+const SIGNATURE_ROW_HEIGHT_TWIPS = 560;
 
 function escapeXml(value) {
   return String(value ?? "")
@@ -267,7 +269,22 @@ function normalizeManualChargeLine(entry) {
   const amount = Number(entry?.amount);
   if (!title || !Number.isFinite(amount) || amount <= 0) return null;
   if (isExtraMileageChargeEntry(entry)) return null;
+  if (isDiscountEntry(entry)) return null;
   return { title, description, amount };
+}
+
+function moneyAmount(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function resolveCheckoutDiscountAmount({ booking, checkOutDraft }) {
+  const fromDraft = moneyAmount(checkOutDraft?.discountAmount);
+  if (fromDraft > 0) return fromDraft;
+  return moneyAmount(
+    (booking?.billEntries ?? [])
+      .filter((entry) => isDiscountEntry(entry))
+      .reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0),
+  );
 }
 
 function formatCheckoutChargeLine(line) {
@@ -556,6 +573,7 @@ export function buildAgreementContext({
   let extraMileageChargeNum = 0;
   let checkoutChargeLines = [];
   let checkoutManualTotal = 0;
+  let checkoutDiscount = 0;
   if (resolvedMode === "check_out") {
     const extraMileage = resolveExtraMileageDisplay({
       checkInMileage: checkInDraft.mileage,
@@ -578,14 +596,20 @@ export function buildAgreementContext({
     });
     checkoutChargeLines = checkoutManualCharges.map(formatCheckoutChargeLine);
     checkoutManualTotal = checkoutManualCharges.reduce((sum, line) => sum + line.amount, 0);
+    checkoutDiscount = resolveCheckoutDiscountAmount({
+      booking,
+      checkOutDraft: effectiveCheckOutDraft,
+    });
   }
 
   const invoiceSubtotal =
     resolvedMode === "check_out"
       ? Math.round((subtotal + extraMileageChargeNum + checkoutManualTotal) * 100) / 100
       : subtotal;
-  const invoiceTax = calculateTaxAmount(invoiceSubtotal);
-  const invoiceTotal = calculateGrandTotal(invoiceSubtotal);
+  const appliedDiscount = Math.min(Math.max(0, checkoutDiscount), Math.max(0, invoiceSubtotal));
+  const taxableBase = Math.round((invoiceSubtotal - appliedDiscount) * 100) / 100;
+  const invoiceTax = calculateTaxAmount(taxableBase);
+  const invoiceTotal = calculateGrandTotal(taxableBase);
   const invoiceBalanceDue = Math.max(0, Math.round((invoiceTotal - paidAmount) * 100) / 100);
 
   return {
@@ -628,6 +652,7 @@ export function buildAgreementContext({
     taxAmount: formatMoney(invoiceTax),
     totalDue: formatMoney(invoiceTotal),
     checkoutChargeLines,
+    checkoutDiscount,
     odometerOut: checkInDraft.mileage != null ? String(checkInDraft.mileage) : "",
     odometerIn:
       effectiveCheckOutDraft?.mileage != null && effectiveCheckOutDraft.mileage !== ""
@@ -759,6 +784,7 @@ export function fillAgreementDocx(templateBuffer, context) {
     context.extraMileageAmount,
   );
   xml = stripTotalDueReturnNote(xml);
+  xml = arrangeInvoiceSummaryRows(xml, context.checkoutDiscount);
   xml = insertPaymentSummaryRows(xml, context.paidAmount, context.balanceDue);
   xml = styleInvoiceTableRows(xml);
   xml = stripRenterInitialParagraphs(xml);
@@ -941,8 +967,10 @@ function removeAdditionalDriverFeeRow(xml) {
 const INVOICE_ZEBRA_WHITE = "FFFFFF";
 const INVOICE_ZEBRA_GREY = "F2F2F2";
 const INVOICE_PAID_GREEN = "157A3A";
+const INVOICE_DISCOUNT_COLOR = "B45309";
 const INVOICE_DUE_RED = "B42318";
 const INVOICE_PAID_FILL = "F3FBF6";
+const INVOICE_DISCOUNT_FILL = "FFFBEB";
 const INVOICE_DUE_FILL = "FDECEC";
 const INVOICE_ROW_BORDER_XML =
   `<w:tcBorders>` +
@@ -996,6 +1024,7 @@ function classifyInvoiceRow(rowXml) {
   ) {
     return "payment";
   }
+  if (/^Discount\b/i.test(text.trim())) return "discount";
   if (/Subtotal/.test(text) || /GST\s*\(5%\)/.test(text)) return "summary";
   return "line";
 }
@@ -1040,6 +1069,72 @@ function styleInvoiceRow(rowXml, { fill } = {}) {
   return parts.join("</w:tc>");
 }
 
+function applyInvoiceRunColor(xml, color) {
+  const tag = `<w:color w:val="${color}"/>`;
+  let next = xml.replace(/<w:color\b[^/]*\/>/g, tag);
+  next = next.replace(/<w:rPr>/g, (open, offset, source) => {
+    const end = source.indexOf("</w:rPr>", offset);
+    if (end > offset && /<w:color\b/.test(source.slice(offset, end))) return open;
+    return `<w:rPr>${tag}`;
+  });
+  return next.replace(/<w:r>(?!<w:rPr>)/g, `<w:r><w:rPr>${tag}</w:rPr>`);
+}
+
+function buildDiscountSummaryRow(amount) {
+  const fill = INVOICE_DISCOUNT_FILL;
+  const color = INVOICE_DISCOUNT_COLOR;
+  const value = `−$${formatMoney(amount)}`;
+  return (
+    `<w:tr><w:trPr>${INVOICE_ROW_TR_BORDERS_XML}</w:trPr>` +
+    invoiceTableCell(5400, invoiceCellParagraph("Discount", { bold: true, color }), { fill }) +
+    invoiceTableCell(1680, invoiceCellParagraph(""), { fill }) +
+    invoiceTableCell(1680, invoiceCellParagraph(""), { fill }) +
+    invoiceTableCell(1680, invoiceCellParagraph(value, { alignRight: true, bold: true, color }), { fill }) +
+    `</w:tr>`
+  );
+}
+
+function arrangeInvoiceSummaryRows(xml, discountAmount) {
+  const marker = "<w:t>Description</w:t>";
+  const descPos = xml.indexOf(marker);
+  if (descPos < 0) return xml;
+  const tableStart = findInvoiceTableStart(xml, descPos);
+  const tableEnd = xml.indexOf("</w:tbl>", descPos);
+  if (tableStart < 0 || tableEnd < 0) return xml;
+
+  const table = xml.slice(tableStart, tableEnd + 8);
+  const firstRow = table.indexOf("<w:tr");
+  if (firstRow < 0) return xml;
+
+  const prefix = table.slice(0, firstRow);
+  const body = table.slice(firstRow, table.lastIndexOf("</w:tbl>"));
+  const rows = [];
+  let cursor = 0;
+  while (cursor < body.length) {
+    const rowStart = body.indexOf("<w:tr", cursor);
+    if (rowStart < 0) break;
+    const rowEnd = body.indexOf("</w:tr>", rowStart);
+    if (rowEnd < 0) break;
+    rows.push(body.slice(rowStart, rowEnd + 7));
+    cursor = rowEnd + 7;
+  }
+
+  const gst = rows.find((row) => /GST\s*\(5%\)/.test(invoiceRowPlainText(row)));
+  const subtotal = rows.find((row) => /^Subtotal/i.test(invoiceRowPlainText(row).trim()));
+  const total = rows.find((row) => classifyInvoiceRow(row) === "total");
+  if (!gst || !subtotal || !total) return xml;
+
+  const firstSummary = Math.min(rows.indexOf(gst), rows.indexOf(subtotal));
+  const totalIndex = rows.indexOf(total);
+  const head = rows
+    .slice(0, firstSummary)
+    .filter((row) => classifyInvoiceRow(row) !== "discount");
+  const tail = rows.slice(totalIndex + 1);
+  const discount = Number(discountAmount) > 0 ? buildDiscountSummaryRow(discountAmount) : null;
+  const next = [...head, subtotal, ...(discount ? [discount] : []), gst, total, ...tail];
+  return xml.slice(0, tableStart) + prefix + next.join("") + "</w:tbl>" + xml.slice(tableEnd + 8);
+}
+
 function styleInvoiceTableRows(xml) {
   const marker = "<w:t>Description</w:t>";
   const descPos = xml.indexOf(marker);
@@ -1070,6 +1165,9 @@ function styleInvoiceTableRows(xml) {
     const kind = classifyInvoiceRow(row);
     if (kind === "header" || kind === "total" || kind === "deposit" || kind === "payment") {
       return row;
+    }
+    if (kind === "discount") {
+      return applyInvoiceRunColor(styleInvoiceRow(row, { fill: INVOICE_DISCOUNT_FILL }), INVOICE_DISCOUNT_COLOR);
     }
     if (kind === "summary") {
       return styleInvoiceRow(row);
@@ -1644,19 +1742,20 @@ function signatureDrawingXml(relId, docPrId, pngBuffer) {
   const EMU = 914400;
   const { width, height } = pngPixelSize(pngBuffer);
   const aspect = width / Math.max(1, height);
-  const maxW = Math.round(2.4 * EMU);
-  const maxH = Math.round(0.48 * EMU);
+  const maxW = Math.round(2.05 * EMU);
+  const maxH = Math.round(0.32 * EMU);
   let cx = maxW;
   let cy = Math.round(cx / aspect);
   if (cy > maxH) {
     cy = maxH;
     cx = Math.round(cy * aspect);
   }
+  const lineTwips = Math.max(240, Math.round((cy / EMU) * 1440) + 40);
   return (
     `<w:p>` +
-    `<w:pPr><w:spacing w:before="80" w:after="0" w:line="1080" w:lineRule="atLeast"/>` +
+    `<w:pPr><w:spacing w:before="40" w:after="0" w:line="${lineTwips}" w:lineRule="atLeast"/>` +
     `<w:jc w:val="left"/></w:pPr>` +
-    `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+    `<w:r><w:drawing><wp:inline distT="0" distB="40" distL="0" distR="0">` +
     `<wp:extent cx="${cx}" cy="${cy}"/>` +
     `<wp:effectExtent l="0" t="0" r="0" b="0"/>` +
     `<wp:docPr id="${docPrId}" name="RenterSignature${docPrId}"/>` +
@@ -1679,14 +1778,15 @@ function isRenterSignatureUnderlineRow(rowXml) {
   return /w:bottom[^>]*w:val="single"/.test(rowXml);
 }
 
-function withMinRowHeight(rowXml, twips = 1080) {
+function withSignatureRowHeight(rowXml) {
+  const height = `<w:trHeight w:val="${SIGNATURE_ROW_HEIGHT_TWIPS}" w:hRule="atLeast"/>`;
   if (/<w:trHeight /.test(rowXml)) {
-    return rowXml.replace(/<w:trHeight [^/]*\/>/, `<w:trHeight w:val="${twips}" w:hRule="atLeast"/>`);
+    return rowXml.replace(/<w:trHeight [^/]*\/>/, height);
   }
   if (/<w:trPr[ >]/.test(rowXml)) {
-    return rowXml.replace(/<w:trPr(?:\s[^>]*)?>/, (open) => `${open}<w:trHeight w:val="${twips}" w:hRule="atLeast"/>`);
+    return rowXml.replace(/<w:trPr(?:\s[^>]*)?>/, (open) => `${open}${height}`);
   }
-  return rowXml.replace(/(<w:tr\b[^>]*>)/, `$1<w:trPr><w:trHeight w:val="${twips}" w:hRule="atLeast"/></w:trPr>`);
+  return rowXml.replace(/<w:tr(?:\s[^>]*)?>/, (open) => `${open}<w:trPr>${height}</w:trPr>`);
 }
 
 function withBottomCellAlign(cellXml) {
@@ -1738,7 +1838,7 @@ function embedRenterSignatureInDocx(docxBuffer, pngBuffer) {
       continue;
     }
     const originalLen = prevRowEnd + 7 - prevRowStart;
-    let prevRow = xml.slice(prevRowStart, prevRowEnd + 7);
+    let prevRow = withSignatureRowHeight(xml.slice(prevRowStart, prevRowEnd + 7));
     if (!isRenterSignatureUnderlineRow(prevRow)) {
       searchFrom = pos + 16;
       continue;
@@ -1757,7 +1857,7 @@ function embedRenterSignatureInDocx(docxBuffer, pngBuffer) {
     }
     const drawing = signatureDrawingXml(relId, 1100 + count, pngBuffer);
     firstCell = firstCell.slice(0, pStart) + drawing + firstCell.slice(pEnd + 6);
-    prevRow = withMinRowHeight(firstCell + prevRow.slice(firstCellEnd + 7));
+    prevRow = firstCell + prevRow.slice(firstCellEnd + 7);
     xml = xml.slice(0, prevRowStart) + prevRow + xml.slice(prevRowStart + originalLen);
     count += 1;
     searchFrom = pos + 16 + (prevRow.length - originalLen);
@@ -1923,10 +2023,11 @@ function isRenterSignatureLabel(label, texts) {
 }
 
 function signatureBoxFromLabel(pageIndex, label, line) {
+  const underlineY = line?.y ?? label.y + 22;
   return {
     pageIndex,
     x: (line?.x ?? label.x) + 2,
-    y: (line?.y ?? label.y + 10) + SIGNATURE_ABOVE_LINE,
+    y: underlineY + SIGNATURE_ABOVE_LINE,
     width: Math.min(SIGNATURE_WIDTH, (line?.w ?? SIGNATURE_WIDTH) - 4),
     height: SIGNATURE_HEIGHT,
   };
@@ -1953,7 +2054,7 @@ export function locateAgreementOverlay(pdfDoc) {
       ? renterLabels
       : texts.filter((item) => isRenterSignatureLabel(item, texts));
     for (const label of labels) {
-      const underline = lineAboveLabel(hlines, label, { xSlop: 48, yMax: 20 });
+      const underline = lineAboveLabel(hlines, label, { xSlop: 48, yMax: 56 });
       const box = signatureBoxFromLabel(i, label, underline);
       if (isFinalPage) finalBoxes.push(box);
       else if (label.x < 280) invoiceBoxes.push(box);
@@ -1973,14 +2074,11 @@ export function locateAgreementOverlay(pdfDoc) {
     }
   }
 
+  const fallbackFinalPage = finalPageIndex >= 0 ? finalPageIndex : pages.length - 1;
   return {
-    invoice: invoiceBoxes[0] ?? null,
-    final: finalBoxes[0] ?? null,
-    date: dateFields[0] ?? (
-      finalPageIndex >= 0
-        ? { ...FINAL_DATE_FIELD, pageIndex: finalPageIndex }
-        : { ...FINAL_DATE_FIELD, pageIndex: pages.length - 1 }
-    ),
+    invoice: invoiceBoxes[0] ?? { ...INVOICE_SIGNATURE_FIELD, pageIndex: 0 },
+    final: finalBoxes[0] ?? { ...FINAL_SIGNATURE_FIELD, pageIndex: fallbackFinalPage },
+    date: dateFields[0] ?? { ...FINAL_DATE_FIELD, pageIndex: fallbackFinalPage },
   };
 }
 
@@ -2015,7 +2113,7 @@ async function embedSignatureImage(pdfDoc, buffer) {
   }
 }
 
-export async function overlaySignatureOnPdf(basePdf, signaturePngBuffer) {
+export async function overlaySignatureOnPdf(basePdf, signaturePngBuffer, options = {}) {
   if (!signaturePngBuffer?.length) {
     return Buffer.isBuffer(basePdf) ? basePdf : Buffer.from(basePdf);
   }
@@ -2027,10 +2125,10 @@ export async function overlaySignatureOnPdf(basePdf, signaturePngBuffer) {
       return Buffer.from(await pdfDoc.save());
     }
     const overlay = locateAgreementOverlay(pdfDoc);
-    if (overlay.invoice) {
+    if (!options.skipInvoice && overlay.invoice) {
       drawSignature(resolvePage(pdfDoc, overlay.invoice.pageIndex), signatureImage, overlay.invoice);
     }
-    if (overlay.final) {
+    if (!options.skipFinal && overlay.final) {
       drawSignature(resolvePage(pdfDoc, overlay.final.pageIndex), signatureImage, overlay.final);
     }
 
@@ -2045,7 +2143,10 @@ export async function generateSignedCheckInAgreementPdf(context, signaturePngBuf
   const signed = embedRenterSignatureInDocx(docxBuffer, signaturePngBuffer);
   const basePdf = await convertDocxToPdf(signed.buffer);
   if (signed.count >= 2) return basePdf;
-  return overlaySignatureOnPdf(basePdf, signaturePngBuffer);
+  return overlaySignatureOnPdf(basePdf, signaturePngBuffer, {
+    skipInvoice: signed.count >= 1,
+    skipFinal: signed.count >= 2,
+  });
 }
 
 export function parseSignatureDataUrl(dataUrl) {

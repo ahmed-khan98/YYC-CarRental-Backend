@@ -1,6 +1,7 @@
 import { User } from "../models/user.model.js";
 import { logger } from "./logger.js";
 import { Car } from "../models/car.model.js";
+import { Location } from "../models/location.model.js";
 import { getBookingPublicNumber } from "./billInvoicePdf.js";
 import {
   getSmtpFrom,
@@ -64,6 +65,7 @@ export function buildCheckInAgreementMailOptions({
   booking,
   customer,
   car,
+  dropoffLocation,
   pdfBuffer,
 }) {
   const smtpFrom = getSmtpFrom();
@@ -72,34 +74,37 @@ export function buildCheckInAgreementMailOptions({
   const bookingRef = getBookingPublicNumber(booking);
   const customerName = customer?.name?.trim() || to || "Customer";
   const carName = carDisplayName(car);
-  const pickupWhen = formatScheduleDate(booking.pickupDate, booking.pickupTime);
   const dropoffWhen = formatScheduleDate(booking.returnDate, booking.returnTime);
+  const dropoffName = dropoffLocation?.name?.trim() || "—";
 
   const text = [
-    "Check-in is complete. Thank you for choosing YYC Car Rental.",
+    `Hi ${customerName},`,
     "",
-    `Booking reference: ${bookingRef}`,
-    `Customer: ${customerName}`,
-    `Car: ${carName}`,
-    `Pickup: ${pickupWhen}`,
-    `Drop-off: ${dropoffWhen}`,
+    `Thank you for completing the check-in process of ${carName}. Please find the attached rental agreement and invoice document.`,
     "",
-    "Your rental agreement is attached as a PDF.",
+    "Kindly return the vehicle on below specified Location, Date & Time.",
     "",
-    "YYC Car Rental",
+    `Booking Reference: ${bookingRef}`,
+    `Drop Off Location: ${dropoffName}`,
+    `Drop Off Date & Time: ${dropoffWhen}`,
+    "",
+    "Drive Safe & Enjoy your trip.",
+    "",
+    "Best Regards,",
+    "YYC Car Rental.",
   ].join("\n");
 
   const html = `
-    <p>Check-in is complete. Thank you for choosing YYC Car Rental.</p>
+    <p>Hi ${escapeHtml(customerName)},</p>
+    <p>Thank you for completing the check-in process of ${escapeHtml(carName)}. Please find the attached rental agreement and invoice document.</p>
+    <p>Kindly return the vehicle on below specified Location, Date &amp; Time.</p>
     <p>
-      <strong>Booking reference:</strong> ${escapeHtml(bookingRef)}<br/>
-      <strong>Customer:</strong> ${escapeHtml(customerName)}<br/>
-      <strong>Car:</strong> ${escapeHtml(carName)}<br/>
-      <strong>Pickup:</strong> ${escapeHtml(pickupWhen)}<br/>
-      <strong>Drop-off:</strong> ${escapeHtml(dropoffWhen)}
+      <strong>Booking Reference:</strong> ${escapeHtml(bookingRef)}<br/>
+      <strong>Drop Off Location:</strong> ${escapeHtml(dropoffName)}<br/>
+      <strong>Drop Off Date &amp; Time:</strong> ${escapeHtml(dropoffWhen)}
     </p>
-    <p>Your rental agreement is attached as a PDF.</p>
-    <p>YYC Car Rental</p>
+    <p>Drive Safe &amp; Enjoy your trip.</p>
+    <p>Best Regards,<br/>YYC Car Rental.</p>
   `;
 
   return {
@@ -112,7 +117,7 @@ export function buildCheckInAgreementMailOptions({
     headers: {
       "Reply-To": replyTo,
     },
-    subject: `Check-In Agreement — YYC Car Rental`,
+    subject: `Check-in Completed – Booking Reference# ${bookingRef}`,
     text,
     html,
     attachments: [
@@ -135,9 +140,10 @@ export async function sendCheckInAgreementEmail(booking, pdfBuffer) {
       return { skipped: true, reason: "no_pdf" };
     }
 
-    const [customer, car] = await Promise.all([
+    const [customer, car, dropoffLocation] = await Promise.all([
       User.findById(booking.userId),
       Car.findById(booking.carId),
+      Location.findById(booking.dropoffLocationId),
     ]);
 
     if (!isValidCustomerEmail(customer?.email)) {
@@ -152,6 +158,7 @@ export async function sendCheckInAgreementEmail(booking, pdfBuffer) {
       booking,
       customer,
       car,
+      dropoffLocation,
       pdfBuffer,
     });
 

@@ -386,6 +386,31 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+const CONTACT_INQUIRY_LABELS = new Set([
+  "Car",
+  "Pickup date",
+  "Pickup location",
+  "Drop-off date",
+  "Drop-off location",
+]);
+
+function contactMessageHtml(message) {
+  return String(message)
+    .split("\n")
+    .map((line) => {
+      const idx = line.indexOf(": ");
+      if (idx > 0) {
+        const label = line.slice(0, idx);
+        const value = line.slice(idx + 2);
+        if (CONTACT_INQUIRY_LABELS.has(label) && value) {
+          return `${escapeHtml(label)}: <strong>${escapeHtml(value)}</strong>`;
+        }
+      }
+      return escapeHtml(line);
+    })
+    .join("<br/>");
+}
+
 export function isSmtpAuthFailure(err) {
   const responseCode = Number(err?.responseCode);
   const text = String(err?.message || err?.response || "");
@@ -436,7 +461,7 @@ export async function sendContactEmail({ fullName, email, phone, message }) {
     <strong>Email:</strong> ${escapeHtml(visitorEmail)}<br/>
     <strong>Phone Number:</strong> ${escapeHtml(phone)}</p>
     <p><strong>Message:</strong></p>
-    <p>${escapeHtml(message).replace(/\n/g, "<br/>")}</p>
+    <p>${contactMessageHtml(message)}</p>
   `;
 
   const info = await sendContactViaOwnTransport({

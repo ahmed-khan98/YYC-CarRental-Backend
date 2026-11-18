@@ -311,6 +311,7 @@ const getCheckInTermsPdf = asyncHandler(async (req, res) => {
       notes: req.body?.notes,
       paymentAmount: req.body?.paymentAmount,
       chargeEntries: req.body?.chargeEntries,
+      discountAmount: req.body?.discountAmount,
     };
   }
 
@@ -403,6 +404,7 @@ const createInspection = asyncHandler(async (req, res) => {
     signatureDataUrl,
     paymentEntry,
     chargeEntries,
+    discountAmount: rawDiscountAmount,
     extraDrivers,
     mainDriver,
   } = req.body;
@@ -566,6 +568,10 @@ const createInspection = asyncHandler(async (req, res) => {
   }
 
   const paymentAmount = Number(paymentEntry?.amount);
+  const requestedDiscount =
+    type === "check_out" && Number.isFinite(Number(rawDiscountAmount))
+      ? Math.round(Number(rawDiscountAmount) * 100) / 100
+      : 0;
   const normalizedCharges =
     type === "check_out" && Array.isArray(chargeEntries)
       ? chargeEntries
@@ -577,7 +583,7 @@ const createInspection = asyncHandler(async (req, res) => {
           .filter((entry) => entry.title && Number.isFinite(entry.amount) && entry.amount > 0)
       : [];
 
-  if (normalizedCharges.length > 0 || paymentAmount > 0) {
+  if (normalizedCharges.length > 0 || paymentAmount > 0 || requestedDiscount > 0) {
     const booking = await Booking.findById(bookingId);
     if (!booking) throw new ApiError(404, "Booking not found");
 
@@ -600,6 +606,26 @@ const createInspection = asyncHandler(async (req, res) => {
       const chargeBillEntry = booking.billEntries[booking.billEntries.length - 1];
       addedChargeEntries.push(chargeBillEntry);
       pendingInvoiceEntryIds.push(billEntryId(chargeBillEntry));
+    }
+
+    if (requestedDiscount > 0) {
+      const summaryBeforeDiscount = computeBillSummary(booking.billEntries);
+      const discountAmount = Math.min(
+        requestedDiscount,
+        Math.max(0, summaryBeforeDiscount.chargeSubtotal),
+      );
+      if (discountAmount > 0) {
+        appendBillEntry(booking, {
+          title: "Discount",
+          amount: discountAmount,
+          entryType: "charge",
+          status: "unpaid",
+          source: "manual",
+          systemKey: "discount",
+          phase: "check_out",
+          ...createdByFields(req.user),
+        });
+      }
     }
 
     if (paymentAmount > 0) {
@@ -797,10 +823,14 @@ const listCheckInOutBoard = asyncHandler(async (req, res) => {
 
     const { page, limit } = paginationOptions(req, { defaultLimit: 20 });
     const filter = { status };
+    const sort =
+      status === "completed"
+        ? { pickupDate: -1, pickupTime: -1, createdAt: -1 }
+        : { pickupDate: 1, pickupTime: 1, createdAt: 1 };
     const [total, bookings] = await Promise.all([
       Booking.countDocuments(filter),
       Booking.find(filter)
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip((page - 1) * limit)
         .limit(limit)
         .populate(CHECKINOUT_BOOKING_POPULATE),
@@ -825,10 +855,10 @@ const listCheckInOutBoard = asyncHandler(async (req, res) => {
 
   const [activeBookings, completedBookings] = await Promise.all([
     Booking.find({ status: { $in: ["confirmed", "checked_in"] } })
-      .sort({ createdAt: -1 })
+      .sort({ pickupDate: 1, pickupTime: 1, createdAt: 1 })
       .populate(CHECKINOUT_BOOKING_POPULATE),
     Booking.find({ status: "completed" })
-      .sort({ createdAt: -1 })
+      .sort({ pickupDate: -1, pickupTime: -1, createdAt: -1 })
       .limit(10)
       .populate(CHECKINOUT_BOOKING_POPULATE),
   ]);

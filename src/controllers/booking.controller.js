@@ -32,7 +32,7 @@ import { pickupDateRangeMatch } from "../utils/pickupDateRange.js";
 import { rentalPeriodsConflictEitherWay } from "../utils/datesOverlap.js";
 import { calculateRentalDays, isValidRentalPeriod } from "../utils/rentalPricing.js";
 import { asBookingYmd, bookingWindowError } from "../utils/bookingWindow.js";
-import { getPreAuthorizedAmount } from "../utils/appConfig.js";
+import { getPreAuthorizedAmount, isUserBookingEnabled } from "../utils/appConfig.js";
 import { calculateServiceCharge } from "../utils/serviceCharge.js";
 import { patchText } from "../utils/patchPayload.js";
 import {
@@ -306,7 +306,7 @@ const getAdminBookings = asyncHandler(async (req, res) => {
   };
   const result = await aggregatePaginate(
     Booking,
-    [{ $match: match }, { $sort: { createdAt: -1 } }],
+    [{ $match: match }, { $sort: { pickupDate: 1, pickupTime: 1, createdAt: 1 } }],
     req,
     { defaultLimit: wantsPagination(req) ? 50 : 200 },
   );
@@ -555,6 +555,10 @@ const getBookingById = asyncHandler(async (req, res) => {
 });
 
 const createBooking = asyncHandler(async (req, res) => {
+  if (!(await isUserBookingEnabled())) {
+    throw new ApiError(403, "Online booking is currently closed. Please contact us to reserve a car.");
+  }
+
   const {
     carId,
     pickupLocationId,

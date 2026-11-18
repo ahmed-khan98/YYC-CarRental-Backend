@@ -8,13 +8,11 @@ import { requireFound, sendCreated, sendOk } from "../utils/http.js";
 const LOCATION_CACHE_TTL_MS = 30_000;
 
 const listLocations = asyncHandler(async (req, res) => {
-  // Temporary: getAll returns only active records (missing isActive treated as active)
-  // const { activeOnly } = req.query;
-  // const key = `locations:${activeOnly === "true" ? "active" : "all"}`;
-  const key = "locations:active";
+  const { activeOnly } = req.query;
+  const onlyActive = activeOnly === "true";
+  const key = onlyActive ? "locations:active" : "locations:all";
   const locations = await cached(key, LOCATION_CACHE_TTL_MS, async () => {
-    // const query = activeOnly === "true" ? { isActive: true } : {};
-    const query = { isActive: { $ne: false } };
+    const query = onlyActive ? { isActive: { $ne: false } } : {};
     return formatDocs(await Location.find(query).lean());
   });
   return sendOk(res, locations, "Locations fetched");

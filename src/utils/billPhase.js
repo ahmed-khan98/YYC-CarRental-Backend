@@ -17,6 +17,11 @@ export function isExtraMileageChargeEntry(entry) {
   return /extra\s*mileage|excess\s*km/i.test(String(entry?.title ?? ""));
 }
 
+export function isDiscountEntry(entry) {
+  if (String(entry?.systemKey ?? "") === "discount") return true;
+  return entry?.entryType === "charge" && /^discount$/i.test(String(entry?.title ?? "").trim());
+}
+
 export function isCheckInSystemCharge(entry) {
   if (entry?.entryType !== "charge" || entry.source !== "system") return false;
   if (isExtraMileageChargeEntry(entry)) return false;
@@ -102,6 +107,7 @@ export function phaseForNewEntry(booking, entry = {}) {
     if (isCheckInPaymentEntry(entry)) return "check_in";
   }
   if (isExtraMileageChargeEntry(entry)) return "check_out";
+  if (isDiscountEntry(entry)) return "check_out";
   if (isCheckInSystemCharge(entry)) return "check_in";
   if (booking?.status === "completed" || booking?.status === "cancelled") return "post";
   if (booking?.status === "checked_in" || booking?.status === "checked_out") return "check_out";
@@ -116,7 +122,8 @@ function isStandaloneManualCharge(entry) {
   return (
     entry?.entryType === "charge" &&
     entry?.source === "manual" &&
-    !isExtraMileageChargeEntry(entry)
+    !isExtraMileageChargeEntry(entry) &&
+    !isDiscountEntry(entry)
   );
 }
 
@@ -131,6 +138,7 @@ export function inferBillEntryPhase(entry, booking = {}, extras = {}) {
     return "post";
   }
   if (isExtraMileageChargeEntry(entry)) return "check_out";
+  if (isDiscountEntry(entry)) return "check_out";
   if (isCheckInSystemCharge(entry)) return "check_in";
   if (entry?.systemKey === "cancellation_fee" || entry?.systemKey === "cancellation_refund") {
     return "post";

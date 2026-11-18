@@ -1,4 +1,4 @@
-import { resolveAppTimeZone } from "./timeFormat.js";
+import { APP_TIMEZONE } from "./timeFormat.js";
 
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_BOOKING_DAY_LIMIT = 30;
@@ -16,9 +16,6 @@ export function bookingWindowErrorMessage(days = bookingDayLimit()) {
 }
 
 export function asBookingYmd(value) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10);
-  }
   if (typeof value !== "string") return "";
   const key = value.trim().slice(0, 10);
   return YMD_RE.test(key) ? key : "";
@@ -26,7 +23,7 @@ export function asBookingYmd(value) {
 
 export function todayYmd(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: resolveAppTimeZone(now),
+    timeZone: APP_TIMEZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

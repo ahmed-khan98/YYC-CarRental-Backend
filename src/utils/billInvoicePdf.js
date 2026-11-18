@@ -21,6 +21,7 @@ import {
   isCheckInPaymentEntry,
   isCheckInSystemCharge,
   isCheckOutPaymentEntry,
+  isDiscountEntry,
   isExtraMileageChargeEntry,
   resolveCheckInAt,
   resolveCheckoutAt,
@@ -89,9 +90,11 @@ const FUEL_LABELS = {
 const INVOICE_ZEBRA_WHITE = "FFFFFF";
 const INVOICE_ZEBRA_GREY = "F2F2F2";
 const INVOICE_PAID_GREEN = "157A3A";
+const INVOICE_DISCOUNT_COLOR = "B45309";
 const INVOICE_DUE_RED = "B42318";
 const INVOICE_PAID_FILL = "F3FBF6";
 const INVOICE_PAID_TOTAL_FILL = "DDF3E6";
+const INVOICE_DISCOUNT_FILL = "FFFBEB";
 const INVOICE_DUE_FILL = "FDECEC";
 const INVOICE_ROW_BORDER_XML =
   `<w:tcBorders>` +
@@ -119,6 +122,47 @@ function formatMoney(amount) {
 function moneyLabel(amount) {
   const formatted = formatMoney(amount);
   return formatted ? `$${formatted}` : "";
+}
+
+function signedMoneyLabel(amount) {
+  const n = moneyNum(amount);
+  if (n < 0) return `−${moneyLabel(Math.abs(n))}`;
+  return moneyLabel(n);
+}
+
+function isDiscountLine(line) {
+  return Boolean(line?.discount) || /^discount$/i.test(String(line?.description ?? "").trim());
+}
+
+function resolveInvoiceDiscountAmount(booking) {
+  const live = (booking?.billEntries ?? []).filter(
+    (entry) => isDiscountEntry(entry) && entry.status !== "refund",
+  );
+  const snap = (booking?.checkOutBillSnapshot?.entries ?? []).filter(
+    (entry) => isDiscountEntry(entry) && entry.status !== "refund",
+  );
+  const entries = live.length ? live : snap;
+  return moneyNum(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+}
+
+function discountLine(amount, description) {
+  const value = moneyNum(amount);
+  if (!(value > 0)) return null;
+  return {
+    description: description || "Discount",
+    rate: value,
+    qtyLabel: "1",
+    amount: -value,
+    discount: true,
+  };
+}
+
+function ensureDiscountLine(lines, booking) {
+  const next = [...(lines ?? [])];
+  if (next.some(isDiscountLine)) return next;
+  const line = discountLine(resolveInvoiceDiscountAmount(booking));
+  if (line) next.push(line);
+  return next;
 }
 
 function escapeXml(value) {
@@ -240,7 +284,7 @@ export function canHaveInvoice(entry) {
   if (entry?.entryType === "payment") return true;
   if (entry?.entryType !== "charge") return false;
   if (entry.systemKey === "cancellation_fee" || entry.systemKey === "cancellation_refund") return true;
-  if (entry.systemKey === "extra_mileage") return false;
+  if (entry.systemKey === "extra_mileage" || entry.systemKey === "discount") return false;
   if (entry.phase === "check_out") return false;
   return entry.source === "manual";
 }
@@ -379,6 +423,9 @@ function checkoutSnapshotIsComplete(booking) {
   if (moneyNum(booking.extraMileageCharge) > 0 && !snap.entries.some(isExtraMileageChargeEntry)) {
     return false;
   }
+  if (resolveInvoiceDiscountAmount(booking) > 0 && !(snap.entries ?? []).some(isDiscountEntry)) {
+    return false;
+  }
   return true;
 }
 
@@ -394,14 +441,22 @@ function resolveCheckoutChargeEntries(booking, extras = {}) {
   });
 }
 
-function totalsFromLines(lines, paymentReceived, fallbackStatus) {
-  const taxable = lines.filter((line) => !line.taxInclusive && !line.payment);
+function totalsFromLines(lines, paymentReceived, fallbackStatus, extraDiscount = 0) {
+  const taxable = lines.filter((line) => !line.taxInclusive && !line.payment && !isDiscountLine(line));
   const carried = moneyNum(
-    lines.filter((line) => line.taxInclusive).reduce((sum, line) => sum + Number(line.amount || 0), 0),
+    lines
+      .filter((line) => line.taxInclusive && !isDiscountLine(line))
+      .reduce((sum, line) => sum + Number(line.amount || 0), 0),
+  );
+  const discountAmount = moneyNum(
+    lines.filter(isDiscountLine).reduce((sum, line) => sum + Math.abs(Number(line.amount) || 0), 0) ||
+      extraDiscount,
   );
   const subtotal = moneyNum(taxable.reduce((sum, line) => sum + Number(line.amount || 0), 0));
-  const taxAmount = calculateTaxAmount(subtotal);
-  const totalAmount = moneyNum(calculateGrandTotal(subtotal) + carried);
+  const appliedDiscount = moneyNum(Math.min(discountAmount, Math.max(0, subtotal)));
+  const taxableBase = moneyNum(Math.max(0, subtotal - appliedDiscount));
+  const taxAmount = calculateTaxAmount(taxableBase);
+  const totalAmount = moneyNum(Math.max(0, calculateGrandTotal(taxableBase) + carried));
   const paid = moneyNum(Math.min(totalAmount, Number(paymentReceived) || 0));
   const amountDue = Math.max(0, moneyNum(totalAmount - paid));
   const status =
@@ -410,6 +465,7 @@ function totalsFromLines(lines, paymentReceived, fallbackStatus) {
   return {
     subtotal,
     taxAmount,
+    discountAmount: appliedDiscount,
     totalAmount,
     paymentReceived: paid,
     amountDue,
@@ -586,16 +642,19 @@ function buildCheckOutInvoiceScope(booking, extras = {}) {
     );
   }
 
-  for (const item of chargeEntries.filter((entry) => !isExtraMileageChargeEntry(entry))) {
+  for (const item of chargeEntries.filter(
+    (entry) => !isExtraMileageChargeEntry(entry) && !isDiscountEntry(entry),
+  )) {
     lines.push(chargeLineForEntry(item, booking, car, days));
   }
+  const discountAmount = resolveInvoiceDiscountAmount(booking);
 
   const checkOutPaid = resolveCheckOutPaidForInvoice(booking, extras);
 
   const paidManualCharges = chargeEntries
     .filter(isStandalonePaidCharge)
     .reduce((sum, item) => sum + moneyNum(resolveBillEntryTotalAmount(item)), 0);
-  const lineTotals = totalsFromLines(lines, 0);
+  const lineTotals = totalsFromLines(lines, 0, undefined, discountAmount);
   const unpaidAfterPayments = Math.max(0, moneyNum(lineTotals.totalAmount - checkOutPaid));
   const chargeCredit = Math.min(paidManualCharges, unpaidAfterPayments);
   const paymentReceived = moneyNum(checkOutPaid + chargeCredit);
@@ -617,11 +676,14 @@ function buildCheckOutInvoiceScope(booking, extras = {}) {
     checkOutPaid,
     previousBalance,
     paymentNotes: buildPaymentNotes(checkInInvoice.checkInPaid, checkOutPaid),
-    ...totalsFromLines(lines, paymentReceived),
+    ...totalsFromLines(lines, paymentReceived, undefined, discountAmount),
   };
 }
 
 function chargeLineForEntry(entry, booking, car, days) {
+  if (isDiscountEntry(entry)) {
+    return discountLine(entry.amount, entry.title || "Discount");
+  }
   if (entry.systemKey === "rental" || String(entry.systemKey ?? "").startsWith("service:")) {
     return systemChargeToLine(entry, booking, car, days);
   }
@@ -671,7 +733,11 @@ export function resolveFullInvoiceScope(booking, extras = {}) {
     }
   }
 
-  const lines = ordered.map((item) => chargeLineForEntry(item, booking, car, days));
+  const lines = ordered
+    .filter((item) => !isDiscountEntry(item))
+    .map((item) => chargeLineForEntry(item, booking, car, days))
+    .filter(Boolean);
+  const discountAmount = resolveInvoiceDiscountAmount(booking);
 
   if (!lines.some((line) => /rental/i.test(line.description))) {
     const rate = resolveBookedDailyRate(booking, car);
@@ -704,7 +770,7 @@ export function resolveFullInvoiceScope(booking, extras = {}) {
   const paidManualCharges = charges
     .filter(isStandalonePaidCharge)
     .reduce((sum, item) => sum + moneyNum(resolveBillEntryTotalAmount(item)), 0);
-  const lineTotals = totalsFromLines(lines, 0);
+  const lineTotals = totalsFromLines(lines, 0, undefined, discountAmount);
   const unpaidAfterPayments = Math.max(0, moneyNum(lineTotals.totalAmount - paymentEntriesTotal));
   const chargeCredit = Math.min(paidManualCharges, unpaidAfterPayments);
   const paymentReceived = moneyNum(paymentEntriesTotal + chargeCredit);
@@ -722,7 +788,7 @@ export function resolveFullInvoiceScope(booking, extras = {}) {
       )
       .reduce((sum, item) => sum + moneyNum(resolveBillEntryTotalAmount(item)), 0),
   );
-  const totals = totalsFromLines(lines, paymentReceived);
+  const totals = totalsFromLines(lines, paymentReceived, undefined, discountAmount);
   const paymentBreakdown = buildFullInvoicePaymentBreakdown({
     checkInPaid,
     checkOutPaid,
@@ -1074,6 +1140,7 @@ function classifyInvoiceRow(rowXml) {
   ) {
     return "payment";
   }
+  if (/^Discount\b/i.test(text.trim())) return "discount";
   if (/Subtotal/.test(text) || /GST\s*\(5%\)/.test(text)) return "summary";
   return "line";
 }
@@ -1117,6 +1184,17 @@ function styleInvoiceRow(rowXml, { fill } = {}) {
   return parts.join("</w:tc>");
 }
 
+function applyInvoiceRunColor(xml, color) {
+  const tag = `<w:color w:val="${color}"/>`;
+  let next = xml.replace(/<w:color\b[^/]*\/>/g, tag);
+  next = next.replace(/<w:rPr>/g, (open, offset, source) => {
+    const end = source.indexOf("</w:rPr>", offset);
+    if (end > offset && /<w:color\b/.test(source.slice(offset, end))) return open;
+    return `<w:rPr>${tag}`;
+  });
+  return next.replace(/<w:r>(?!<w:rPr>)/g, `<w:r><w:rPr>${tag}</w:rPr>`);
+}
+
 function styleInvoiceTableRows(xml) {
   const marker = "<w:t>Description</w:t>";
   const descPos = xml.indexOf(marker);
@@ -1147,6 +1225,9 @@ function styleInvoiceTableRows(xml) {
     const kind = classifyInvoiceRow(row);
     if (kind === "header" || kind === "total" || kind === "deposit" || kind === "payment") {
       return row;
+    }
+    if (kind === "discount") {
+      return applyInvoiceRunColor(styleInvoiceRow(row, { fill: INVOICE_DISCOUNT_FILL }), INVOICE_DISCOUNT_COLOR);
     }
     if (kind === "summary") return styleInvoiceRow(row);
     const fill = lineIndex % 2 === 0 ? INVOICE_ZEBRA_WHITE : INVOICE_ZEBRA_GREY;
@@ -1191,7 +1272,7 @@ function buildInvoiceLineRow(line, index) {
     invoiceTableCell(5400, invoiceCellParagraph(description), { fill }) +
     invoiceTableCell(1680, invoiceCellParagraph(rate, { alignRight: true }), { fill }) +
     invoiceTableCell(1680, invoiceCellParagraph(line.qtyLabel ?? "", { alignRight: true }), { fill }) +
-    invoiceTableCell(1680, invoiceCellParagraph(moneyLabel(line.amount), { alignRight: true }), { fill }) +
+    invoiceTableCell(1680, invoiceCellParagraph(signedMoneyLabel(line.amount), { alignRight: true }), { fill }) +
     `</w:tr>`
   );
 }
@@ -1261,6 +1342,64 @@ function fillLastCellAmount(rowXml, amount, { bold = false } = {}) {
   }
   if (bold) parts[0] = ensureBoldInCell(parts[0]);
   return parts.join("</w:tc>");
+}
+
+function buildDiscountSummaryRow(amount) {
+  const fill = INVOICE_DISCOUNT_FILL;
+  const color = INVOICE_DISCOUNT_COLOR;
+  return (
+    `<w:tr><w:trPr>${INVOICE_ROW_TR_BORDERS_XML}</w:trPr>` +
+    invoiceTableCell(5400, invoiceCellParagraph("Discount", { bold: true, color }), { fill }) +
+    invoiceTableCell(1680, invoiceCellParagraph(""), { fill }) +
+    invoiceTableCell(1680, invoiceCellParagraph(""), { fill }) +
+    invoiceTableCell(
+      1680,
+      invoiceCellParagraph(`−${moneyLabel(amount)}`, { alignRight: true, bold: true, color }),
+      { fill },
+    ) +
+    `</w:tr>`
+  );
+}
+
+function arrangeInvoiceSummaryRows(xml, discountAmount) {
+  const marker = "<w:t>Description</w:t>";
+  const descPos = xml.indexOf(marker);
+  if (descPos < 0) return xml;
+  const tableStart = findInvoiceTableStart(xml, descPos);
+  const tableEnd = xml.indexOf("</w:tbl>", descPos);
+  if (tableStart < 0 || tableEnd < 0) return xml;
+
+  const table = xml.slice(tableStart, tableEnd + 8);
+  const firstRow = table.indexOf("<w:tr");
+  if (firstRow < 0) return xml;
+
+  const prefix = table.slice(0, firstRow);
+  const body = table.slice(firstRow, table.lastIndexOf("</w:tbl>"));
+  const rows = [];
+  let cursor = 0;
+  while (cursor < body.length) {
+    const rowStart = body.indexOf("<w:tr", cursor);
+    if (rowStart < 0) break;
+    const rowEnd = body.indexOf("</w:tr>", rowStart);
+    if (rowEnd < 0) break;
+    rows.push(body.slice(rowStart, rowEnd + 7));
+    cursor = rowEnd + 7;
+  }
+
+  const gst = rows.find((row) => /GST\s*\(5%\)/.test(invoiceRowPlainText(row)));
+  const subtotal = rows.find((row) => /^Subtotal/i.test(invoiceRowPlainText(row).trim()));
+  const total = rows.find((row) => classifyInvoiceRow(row) === "total");
+  if (!gst || !subtotal || !total) return xml;
+
+  const firstSummary = Math.min(rows.indexOf(gst), rows.indexOf(subtotal));
+  const totalIndex = rows.indexOf(total);
+  const head = rows
+    .slice(0, firstSummary)
+    .filter((row) => classifyInvoiceRow(row) !== "discount");
+  const tail = rows.slice(totalIndex + 1);
+  const discount = moneyNum(discountAmount) > 0 ? buildDiscountSummaryRow(discountAmount) : null;
+  const next = [...head, subtotal, ...(discount ? [discount] : []), gst, total, ...tail];
+  return xml.slice(0, tableStart) + prefix + next.join("") + "</w:tbl>" + xml.slice(tableEnd + 8);
 }
 
 function fillLabeledAmountRow(xml, labelRe, amount, { bold = false } = {}) {
@@ -1698,6 +1837,7 @@ export function fillBillInvoiceDocx(templateBuffer, invoiceInput) {
   xml = fillLabeledAmountRow(xml, /^Subtotal/, invoice.subtotal, { bold: true });
   xml = fillLabeledAmountRow(xml, /^GST/, invoice.taxAmount);
   xml = fillLabeledAmountRow(xml, /TOTAL\s*DUE/i, invoice.totalAmount, { bold: true });
+  xml = arrangeInvoiceSummaryRows(xml, invoice.discountAmount);
   xml = stripTotalDueReturnNote(xml);
   xml = fillPaidAndStatus(xml, invoice);
   xml = stripInvoiceInitialsLine(xml);

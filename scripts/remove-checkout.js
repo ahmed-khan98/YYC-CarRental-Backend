@@ -29,7 +29,7 @@ const checkoutChargeTitles = new Set(["fuel refill"]);
 
 const beforeBillCount = booking.billEntries?.length ?? 0;
 booking.billEntries = (booking.billEntries ?? []).filter((entry) => {
-  if (entry.systemKey === "extra_mileage") return false;
+  if (entry.systemKey === "extra_mileage" || entry.systemKey === "discount") return false;
   if (entry.entryType === "payment" && /check[\s-]?out/i.test(entry.title ?? "")) return false;
   if (entry.phase === "check_out" && entry.entryType === "payment") return false;
   if (

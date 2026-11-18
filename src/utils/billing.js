@@ -12,6 +12,7 @@ import {
   inferBillEntryPhase,
   isCheckInPaymentEntry,
   isCheckOutPaymentEntry,
+  isDiscountEntry,
   isExtraMileageChargeEntry,
   phaseForNewEntry,
 } from "./billPhase.js";
@@ -51,6 +52,7 @@ export function resolveBillEntryTotalAmount(entry) {
 /** Paid deposit/e-transfer charges settle the bill without a payment line. Checkout charges marked paid because a check-out payment already covered them must not be credited again. */
 export function isStandalonePaidCharge(entry) {
   if (!entry || entry.entryType !== "charge") return false;
+  if (isDiscountEntry(entry)) return false;
   if (entry.source !== "manual") return false;
   if (resolveEntryStatus(entry) !== "paid") return false;
   return entry.paidVia === "deposit" || entry.paidVia === "e_transfer";
@@ -61,12 +63,19 @@ export function isStandalonePaidCharge(entry) {
  */
 export function computeBillSummary(entries = []) {
   const list = entries ?? [];
-  const charges = list.filter((e) => e.entryType === "charge");
+  const charges = list.filter((e) => e.entryType === "charge" && !isDiscountEntry(e));
   const payments = list.filter((e) => e.entryType === "payment");
+  const discountAmount = Math.round(
+    list
+      .filter((e) => isDiscountEntry(e) && resolveEntryStatus(e) !== "refund")
+      .reduce((sum, e) => sum + (Number(e.amount) || 0), 0) * 100,
+  ) / 100;
 
-  const chargeSubtotal = charges.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-  const taxAmount = calculateTaxAmount(chargeSubtotal);
-  const totalBill = calculateGrandTotal(chargeSubtotal);
+  const chargeSubtotal = Math.round(charges.reduce((sum, e) => sum + (Number(e.amount) || 0), 0) * 100) / 100;
+  const appliedDiscount = Math.min(discountAmount, Math.max(0, chargeSubtotal));
+  const taxable = Math.round((chargeSubtotal - appliedDiscount) * 100) / 100;
+  const taxAmount = calculateTaxAmount(taxable);
+  const totalBill = calculateGrandTotal(taxable);
 
   const paymentTotal = payments
     .filter((e) => resolveEntryStatus(e) === "paid")
@@ -87,6 +96,7 @@ export function computeBillSummary(entries = []) {
   return {
     chargeSubtotal,
     taxAmount,
+    discountAmount: appliedDiscount,
     totalBill,
     totalPaid,
     totalUnpaid,
@@ -231,7 +241,8 @@ export function appendBillEntry(booking, entry) {
   if (!booking.billEntries) booking.billEntries = [];
 
   const amount = Math.round(Number(entry.amount) * 100) / 100;
-  const chargeTotals = entry.entryType === "charge" ? getBillEntryTotals(amount) : null;
+  const isDiscount = isDiscountEntry(entry) || entry.systemKey === "discount";
+  const chargeTotals = entry.entryType === "charge" && !isDiscount ? getBillEntryTotals(amount) : null;
 
   booking.billEntries.push({
     title: entry.title,
@@ -247,8 +258,8 @@ export function appendBillEntry(booking, entry) {
     createdByUserId: entry.createdByUserId,
     createdByName: entry.createdByName,
     createdByRole: entry.createdByRole,
-    taxAmount: chargeTotals?.taxAmount,
-    totalAmount: chargeTotals?.totalAmount,
+    taxAmount: isDiscount ? 0 : chargeTotals?.taxAmount,
+    totalAmount: isDiscount ? amount : chargeTotals?.totalAmount,
     invoiceNumber: entry.invoiceNumber,
     invoicePdfUrl: entry.invoicePdfUrl,
     paidVia: entry.paidVia,
@@ -298,7 +309,10 @@ export function capturePhaseBillSnapshot(booking, phase, extras = {}) {
     .filter((entry) => {
       if (inferBillEntryPhase(entry, booking, extras) === phase) return true;
       if (phase === "check_in" && isCheckInPaymentEntry(entry)) return true;
-      if (phase === "check_out" && (isCheckOutPaymentEntry(entry) || isExtraMileageChargeEntry(entry))) {
+      if (
+        phase === "check_out" &&
+        (isCheckOutPaymentEntry(entry) || isExtraMileageChargeEntry(entry) || isDiscountEntry(entry))
+      ) {
         return true;
       }
       return false;

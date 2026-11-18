@@ -16,10 +16,16 @@ process.on("uncaughtException", (err) => {
 connectDB()
   .then(async () => {
     await ensureUploadsRoot();
-    app.listen(process.env.PORT || 5000, () => {
-      logger.info(`Server is running at port :${process.env.PORT || 5000}`);
+    const port = Number(process.env.PORT || 5000);
+    const server = app.listen({ port, exclusive: true }, () => {
+      const addr = server.address();
+      logger.info(`Server is running at port :${addr?.port || port}`);
       logger.info(`Uploads: ${getUploadsRoot()}`);
       startEmailJobWorker();
+    });
+    server.on("error", (err) => {
+      logger.error(`Failed to bind port ${port}:`, err.code || err.message);
+      process.exit(1);
     });
   })
   .catch((err) => {

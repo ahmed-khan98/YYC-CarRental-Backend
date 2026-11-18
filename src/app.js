@@ -20,6 +20,8 @@ import inspectionRouter from "./routes/inspection.routes.js";
 import uploadRouter from "./routes/upload.routes.js";
 import contactRouter from "./routes/contact.routes.js";
 import configRouter from "./routes/config.routes.js";
+import featureRouter from "./routes/feature.routes.js";
+import statsRouter from "./routes/stats.routes.js";
 
 const app = express();
 
@@ -87,6 +89,9 @@ const apiRoutes = [
   ["/upload", uploadRouter],
   ["/contact", contactRouter],
   ["/config", configRouter],
+  ["/feature", featureRouter],
+  ["/features", featureRouter],
+  ["/stats", statsRouter],
 ];
 
 for (const prefix of ["/api/v1", "/api"]) {

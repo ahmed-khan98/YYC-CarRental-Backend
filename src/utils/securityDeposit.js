@@ -1,9 +1,7 @@
 import { ApiError } from "./ApiError.js";
-import { DEFAULT_PRE_AUTHORIZED_AMOUNT } from "./appConfig.js";
 import { resolveBillEntryTotalAmount } from "./billing.js";
 import { isCheckInPaymentEntry, resolveCheckoutAt } from "./billPhase.js";
 
-export const SECURITY_DEPOSIT_AMOUNT = DEFAULT_PRE_AUTHORIZED_AMOUNT;
 export const SECURITY_DEPOSIT_HOLD_DAYS = 15;
 
 function money(value) {
@@ -55,8 +53,7 @@ export function sumDepositDeductions(entries = [], excludeEntryId) {
 }
 
 export function resolveBookingPreAuthorizedAmount(booking) {
-  const amount = money(booking?.securityDepositAmount);
-  return amount > 0 ? amount : DEFAULT_PRE_AUTHORIZED_AMOUNT;
+  return money(booking?.securityDepositAmount);
 }
 
 export function computeDepositTotals(booking, excludeEntryId) {

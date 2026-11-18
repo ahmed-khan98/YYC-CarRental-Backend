@@ -1,6 +1,5 @@
 import { User } from "../models/user.model.js";
 import { logger } from "./logger.js";
-import { DEFAULT_PRE_AUTHORIZED_AMOUNT } from "./appConfig.js";
 import { getBookingPublicNumber } from "./billInvoicePdf.js";
 import { resolveBillEntryTotalAmount } from "./billing.js";
 import {
@@ -45,10 +44,11 @@ function paymentMethodExplanation(entry, remainingDeposit, depositAmount) {
       remainingDeposit != null && Number.isFinite(Number(remainingDeposit))
         ? ` Remaining security deposit: ${formatMoney(remainingDeposit)}.`
         : "";
-    const hold = Number.isFinite(Number(depositAmount)) && Number(depositAmount) > 0
-      ? formatMoney(depositAmount)
-      : formatMoney(DEFAULT_PRE_AUTHORIZED_AMOUNT);
-    return `This bill was charged from your ${hold} security deposit.${remaining}`;
+    const hold =
+      Number.isFinite(Number(depositAmount)) && Number(depositAmount) > 0
+        ? ` ${formatMoney(depositAmount)}`
+        : "";
+    return `This bill was charged from your${hold} security deposit.${remaining}`;
   }
   return "This invoice is unpaid. Please pay by e-transfer.";
 }
