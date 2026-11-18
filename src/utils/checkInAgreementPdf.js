@@ -1015,7 +1015,9 @@ function classifyInvoiceRow(rowXml) {
   const text = invoiceRowPlainText(rowXml);
   if (/Description/.test(text) && /Days\s*\/\s*Qty/.test(text)) return "header";
   if (/SECURITY\s*DEPOSIT/i.test(text)) return "deposit";
-  if (/TOTAL(\s*DUE)?/i.test(text) && !/Total paid/i.test(text) && !/Total Loss/i.test(text)) {
+  if (/^Discount\b/i.test(text.trim())) return "discount";
+  if (/^Subtotal/i.test(text.trim()) || /GST\s*\(5%\)/.test(text)) return "summary";
+  if (/^TOTAL(\s*DUE)?\b/i.test(text.trim()) && !/^Total paid/i.test(text.trim())) {
     return "total";
   }
   if (
@@ -1024,8 +1026,6 @@ function classifyInvoiceRow(rowXml) {
   ) {
     return "payment";
   }
-  if (/^Discount\b/i.test(text.trim())) return "discount";
-  if (/Subtotal/.test(text) || /GST\s*\(5%\)/.test(text)) return "summary";
   return "line";
 }
 
